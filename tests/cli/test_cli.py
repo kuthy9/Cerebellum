@@ -372,6 +372,22 @@ def test_a_bad_pricing_file_is_a_clear_error(runner, tmp_path, monkeypatch):
     assert "CEREBELLUM_PRICING_FILE" in result.text and "not valid JSON" in result.text
 
 
+def test_a_bad_numeric_setting_is_a_clear_error(runner, monkeypatch):
+    """Review finding: CEREBELLUM_SANDBOX_PORT=abc ended every command in a ValueError
+    traceback."""
+    monkeypatch.setenv("CEREBELLUM_SANDBOX_PORT", "abc")
+    fake_server(monkeypatch)
+    commands = (("runs",), ("tasks",), ("ui", "--no-sandbox", "--mock"), ("run", WORKFLOW))
+    for command in commands:
+        result = invoke(runner, *command)
+        assert result.exit_code == 1, (command, result.text)
+        assert isinstance(result.exception, SystemExit), command  # handled, not a traceback
+        assert "CEREBELLUM_SANDBOX_PORT must be an integer from 1 to 65535, got 'abc'" in (
+            result.text
+        )
+        assert "Traceback" not in result.text
+
+
 def test_a_corrupt_database_is_a_clear_error(runner, tmp_path, monkeypatch):
     """Review finding: sqlite errors (corrupt or unwritable CEREBELLUM_HOME) were tracebacks."""
     home = tmp_path / "home"
