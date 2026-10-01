@@ -25,6 +25,7 @@ from rich.live import Live
 from rich.rule import Rule
 from rich.text import Text
 from typer.core import TyperGroup
+from uvicorn.config import STARTUP_FAILURE
 
 from cerebellum import __version__
 from cerebellum.ai import AnthropicProvider, select_provider
@@ -852,6 +853,18 @@ def connectors_check(
     raise typer.Exit(EXIT_OK if all(health.ok for _, _, health in results) else EXIT_FAILED)
 
 
+def _serve(serve: Callable[[], None], what: str, host: str, port: int) -> None:
+    """Run a uvicorn server in the foreground. When it cannot start (a busy port, a host that
+    does not resolve) uvicorn logs why and exits 3, which here means a run awaits approval:
+    exit 1 with a line saying what did not start instead."""
+    try:
+        serve()
+    except SystemExit as exc:
+        if exc.code == STARTUP_FAILURE:
+            _fail(f"the {what} could not start on {host}:{port} (see the error above)")
+        raise
+
+
 def _port_option(help: str) -> Any:
     """A --port flag: the range CEREBELLUM_*_PORT accepts, so 0 ("any free port") and
     out-of-range numbers are invalid options (exit 2) rather than a default or a bind error."""
@@ -877,11 +890,16 @@ def sandbox(
     console.print(
         render.header("sandbox payments API", f"http://{bind_host}:{bind_port} · fail mode {mode}")
     )
-    uvicorn.run(
-        create_payments_app(PaymentsState(mode)),
-        host=bind_host,
-        port=bind_port,
-        log_level="warning",
+    _serve(
+        lambda: uvicorn.run(
+            create_payments_app(PaymentsState(mode)),
+            host=bind_host,
+            port=bind_port,
+            log_level="warning",
+        ),
+        "sandbox payments API",
+        bind_host,
+        bind_port,
     )
 
 
@@ -933,7 +951,12 @@ def ui(
         console.print(Text("  Ctrl-C to stop", style=render.MUTED))
         if open_browser:
             threading.Timer(1.0, webbrowser.open, args=(url,)).start()
-        dashboard_server(dashboard, host=bind_host, port=bind_port).run()
+        _serve(
+            dashboard_server(dashboard, host=bind_host, port=bind_port).run,
+            "dashboard",
+            bind_host,
+            bind_port,
+        )
 
 
 @app.command("eval")

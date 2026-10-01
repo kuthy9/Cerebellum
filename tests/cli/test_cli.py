@@ -572,6 +572,22 @@ def test_a_port_flag_accepts_the_whole_range(runner, monkeypatch, command, port)
     assert (calls or sandbox_calls)["port"] == port
 
 
+@pytest.mark.parametrize(
+    ("command", "what"),
+    [(("ui", "--no-sandbox", "--mock"), "dashboard"), (("sandbox",), "sandbox payments API")],
+)
+def test_a_server_that_cannot_start_exits_1(runner, free_port, command, what):
+    """Review finding: when uvicorn could not bind (a busy port, a host that does not resolve)
+    it exited 3, the code that means a run is waiting for approval."""
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", free_port))
+        blocker.listen()
+        result = invoke(runner, *command, "--port", str(free_port))
+    assert result.exit_code == 1, result.text
+    assert isinstance(result.exception, SystemExit)
+    assert f"the {what} could not start on 127.0.0.1:{free_port}" in result.text, result.text
+
+
 def test_ui_reports_whether_mock_ai_was_requested(runner, monkeypatch):
     calls = fake_server(monkeypatch)
     monkeypatch.delenv("CEREBELLUM_MOCK")
