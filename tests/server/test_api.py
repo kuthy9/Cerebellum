@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 
@@ -8,6 +9,7 @@ from fastapi.testclient import TestClient
 from cerebellum.ai.mock import MockProvider
 from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments_app
 from cerebellum.server.app import create_app
+from cerebellum.server.catalog import Catalog
 from cerebellum.templates import template_path
 
 WORKFLOW_ID = "workflow.yaml"  # the packaged refund template, scanned from its own directory
@@ -168,6 +170,25 @@ def test_metrics_and_workflows(client, store):
     assert detail["yaml"].startswith("name: refund_request")
     assert detail["params"] == {"approval_threshold": 500}
     assert client.get("/api/workflows/missing.yaml").status_code == 404
+
+
+def test_the_workflow_catalog_is_scanned_off_the_event_loop(client, store, monkeypatch):
+    scanned_on = []
+    real_entries = Catalog.entries
+
+    def entries(self):
+        try:
+            asyncio.get_running_loop()
+            scanned_on.append("event loop")
+        except RuntimeError:
+            scanned_on.append("thread")
+        return real_entries(self)
+
+    monkeypatch.setattr(Catalog, "entries", entries)
+    assert client.get("/api/workflows").status_code == 200
+    assert client.get(f"/api/workflows/{WORKFLOW_ID}").status_code == 200
+    settled(store, start(client, "small"), "succeeded")
+    assert scanned_on == ["thread", "thread", "thread"]
 
 
 def make_static(tmp_path):

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable, Collection, Mapping
 from pathlib import Path
@@ -205,7 +206,7 @@ def create_app(
     async def start_run(body: StartRun, request: Request):
         _, worker, catalog = parts(request)
         try:
-            entry = catalog.get(body.workflow)
+            entry = await asyncio.to_thread(catalog.get, body.workflow)
         except KeyError as exc:
             raise HTTPException(404, f"unknown workflow {body.workflow!r}") from exc
         record = worker.start_run(entry.workflow, body.input, body.params)
@@ -310,18 +311,22 @@ def create_app(
             "history": [js.eval_run_json(r) for r in history],
         }
 
+    # The catalog walks the --workflows tree and parses what changed: in a worker thread, so a
+    # large tree never stalls event streams or running steps.
     @app.get("/api/workflows")
     async def list_workflows(request: Request):
         _, _, catalog = parts(request)
-        return {"workflows": [js.workflow_summary(entry) for entry in catalog.entries()]}
+        entries = await asyncio.to_thread(catalog.entries)
+        return {"workflows": [js.workflow_summary(entry) for entry in entries]}
 
     @app.get("/api/workflows/{workflow_id:path}")
     async def workflow_detail(workflow_id: str, request: Request):
         _, _, catalog = parts(request)
         try:
-            return js.workflow_detail(catalog.get(workflow_id))
+            entry = await asyncio.to_thread(catalog.get, workflow_id)
         except KeyError as exc:
             raise HTTPException(404, f"unknown workflow {workflow_id!r}") from exc
+        return js.workflow_detail(entry)
 
     @app.get("/api/stream")
     async def stream(request: Request, after: int | None = None) -> StreamingResponse:
