@@ -99,6 +99,32 @@ def test_a_mock_dashboard_refuses_to_continue_a_claude_run(client, store, settin
     assert store.get_approval(pending.id).status == "pending"
 
 
+NEEDS_ENV = """
+name: needs_env
+connectors:
+  api: {type: rest, base_url: "${CEREBELLUM_TEST_API_URL}"}
+steps:
+  - {id: gate, type: approval, title: Go ahead}
+  - {id: call, type: http, needs: [gate], connector: api, method: GET, path: /ping}
+"""
+
+
+def test_run_detail_shows_the_graph_when_connector_variables_are_unset(
+    client, store, settings, tmp_path, monkeypatch
+):
+    """Review finding: the run detail parsed the snapshot as if to drive it and dropped the step
+    graph when a connector ${VAR} was unset in the dashboard's environment."""
+    monkeypatch.setenv("CEREBELLUM_TEST_API_URL", "http://127.0.0.1:9")
+    workflow = parse_workflow(NEEDS_ENV, base_dir=tmp_path)
+    run = asyncio.run(Engine(store, settings, MockProvider(latency=(0, 0))).start(workflow))
+    monkeypatch.delenv("CEREBELLUM_TEST_API_URL")
+    detail = client.get(f"/api/runs/{run.run_id}")
+    assert detail.status_code == 200, detail.text
+    graph = detail.json()["graph"]
+    assert graph is not None
+    assert [step["id"] for step in graph["steps"]] == ["gate", "call"]
+
+
 def test_info_reports_mock_mode(client):
     info = client.get("/api/info").json()
     assert info["mock"] is True and info["mode"] == "mock AI (requested)"

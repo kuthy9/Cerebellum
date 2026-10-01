@@ -679,7 +679,9 @@ def _decide(
     with _sandbox(settings, "never", enabled=sandbox and resume):
         with Store(settings.db_path) as store:
             run = _get_run(store, run_id)
-            workflow = _run_workflow(store, run)
+            # Recording a decision without resuming opens no connector: the snapshot is only
+            # displayed. The engine re-parses it with the real values when it resumes the run.
+            workflow = _run_workflow(store, run, display_only=not resume)
             # Recording a decision without resuming calls no AI, so any provider will do.
             provider = (
                 _run_provider(settings, run)

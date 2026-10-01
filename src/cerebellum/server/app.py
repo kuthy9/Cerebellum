@@ -220,9 +220,10 @@ def create_app(
         active, _, _ = parts(request)
         run = active.get_run(run_id)
         try:
-            graph = js.graph_json(load_run_workflow(active, run))
+            # Display only: connector ${VAR}s unset in this server's environment stay unresolved.
+            graph = js.graph_json(load_run_workflow(active, run, require_env=False))
         except SpecError:
-            graph = None  # the snapshot needs env vars this server does not have
+            graph = None  # the snapshot no longer parses here
         return {
             "run": js.run_json(run, stale=active.is_stale(run)),
             "steps": [js.step_json(step) for step in active.get_steps(run_id).values()],

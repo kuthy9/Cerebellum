@@ -336,6 +336,29 @@ def test_status_shows_a_run_whose_connector_variables_are_unset(runner, tmp_path
     assert invoke(runner, "approvals").text.count(run_id) == 1  # still pending
 
 
+@pytest.mark.parametrize(("command", "verb"), [("approve", "approved"), ("reject", "rejected")])
+def test_a_decision_without_resuming_needs_no_connector_variables(
+    runner, tmp_path, monkeypatch, command, verb
+):
+    """Review finding: `approve/reject --no-resume` opens no connector, yet exited 2 when the
+    snapshot's ${VAR}s were unset in this shell. Resuming the run still needs the real values."""
+    flow = tmp_path / "needs_env.yaml"
+    flow.write_text(ENV_FLOW, encoding="utf-8")
+    monkeypatch.setenv("CEREBELLUM_TEST_API_URL", "http://127.0.0.1:9")
+    started = invoke(runner, "run", str(flow))
+    assert started.exit_code == 3, started.text
+    run_id = run_id_of(started)
+    monkeypatch.delenv("CEREBELLUM_TEST_API_URL")
+
+    decided = invoke(runner, command, run_id, "--by", "alice", "--no-resume")
+    assert decided.exit_code == 3, decided.text  # recorded; the run waits to be resumed
+    assert f"{verb} by alice" in decided.text
+    assert run_id not in invoke(runner, "approvals").text  # no longer pending
+    refused = invoke(runner, "resume", run_id)
+    assert refused.exit_code == 2, refused.text
+    assert "CEREBELLUM_TEST_API_URL is not set" in refused.text
+
+
 def test_a_bad_pricing_file_is_a_clear_error(runner, tmp_path, monkeypatch):
     """Review finding: a bad CEREBELLUM_PRICING_FILE ended the CLI with a traceback."""
     monkeypatch.delenv("CEREBELLUM_MOCK")
