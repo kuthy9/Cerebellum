@@ -1,9 +1,14 @@
-"""JSON shapes returned by the dashboard API."""
+"""JSON shapes returned by the dashboard API, and the JSON text they are sent as."""
 
 from __future__ import annotations
 
 import dataclasses
+import json
+import math
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
+
+from fastapi.responses import JSONResponse
 
 from cerebellum.runtime.store import (
     ApprovalRecord,
@@ -19,6 +24,41 @@ from cerebellum.spec.models import Workflow
 
 if TYPE_CHECKING:
     from cerebellum.server.catalog import WorkflowEntry
+
+
+def finite(value: Any) -> Any:
+    """`value` with every NaN, Infinity and -Infinity (in nested dicts and lists too) as None."""
+    if isinstance(value, float):
+        return value if math.isfinite(value) else None
+    if isinstance(value, dict):
+        return {key: finite(item) for key, item in value.items()}
+    if isinstance(value, list | tuple):
+        return [finite(item) for item in value]
+    return value
+
+
+def dumps(value: Any, *, default: Callable[[Any], Any] | None = None) -> str:
+    """The JSON text of every API response and event-stream message. JSON has no NaN or
+    Infinity (browsers refuse them, Starlette's JSONResponse raises), but stored records can
+    hold them: a query or AI output, an older run, an infinite cost. They are sent as null, as
+    the browser's JSON.stringify does, so a number field stays a number or null."""
+
+    def encode(data: Any) -> str:
+        return json.dumps(
+            data, ensure_ascii=False, allow_nan=False, separators=(",", ":"), default=default
+        )
+
+    try:
+        return encode(value)
+    except ValueError:  # a non-finite number somewhere: rare, so only then copy the value
+        return encode(finite(value))
+
+
+class APIResponse(JSONResponse):
+    """The JSON response of every dashboard endpoint and error handler (see `dumps`)."""
+
+    def render(self, content: Any) -> bytes:
+        return dumps(content).encode("utf-8")
 
 
 def run_json(run: RunRecord, *, stale: bool = False) -> dict[str, Any]:

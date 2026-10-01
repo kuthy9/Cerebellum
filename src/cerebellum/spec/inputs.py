@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Callable, Mapping
+import math
+from collections.abc import Callable, Iterable, Mapping
 from typing import Any
 
 from cerebellum.errors import SpecError, SpecIssue
@@ -37,6 +38,8 @@ def validate_input(wf: Workflow, data: Any) -> dict[str, Any]:
             )
         elif field.enum is not None and value not in field.enum:
             issues.append(SpecIssue(f"input.{name}", f"must be one of {field.enum}"))
+        else:
+            issues += _non_finite_issues(value, f"input.{name}")
     for key in sorted(set(data) - set(wf.input), key=str):
         issues.append(SpecIssue(f"input.{key}", "is not declared in the workflow"))
     if issues:
@@ -47,8 +50,31 @@ def validate_input(wf: Workflow, data: Any) -> dict[str, Any]:
 def resolve_params(wf: Workflow, overrides: Mapping[str, Any] | None = None) -> dict[str, Any]:
     overrides = dict(overrides or {})
     unknown = sorted(set(overrides) - set(wf.params))
-    if unknown:
-        raise SpecError(
-            [SpecIssue(f"params.{key}", "is not declared in the workflow") for key in unknown]
-        )
+    issues = [SpecIssue(f"params.{key}", "is not declared in the workflow") for key in unknown]
+    for key, value in overrides.items():
+        if key in wf.params:
+            issues += _non_finite_issues(value, f"params.{key}")
+    if issues:
+        raise SpecError(issues)
     return {**wf.params, **overrides}
+
+
+def _non_finite_issues(value: Any, path: str) -> list[SpecIssue]:
+    """The first NaN or infinity anywhere in `value`, as an issue. A run's input and params are
+    JSON, which has neither (the dashboard can only show such a number as null)."""
+    if isinstance(value, float):
+        if math.isfinite(value):
+            return []
+        return [SpecIssue(path, f"must be a finite number, got {value!r}")]
+    items: Iterable[tuple[str, Any]]
+    if isinstance(value, dict):
+        items = ((f"{path}.{key}", item) for key, item in value.items())
+    elif isinstance(value, list):
+        items = ((f"{path}[{index}]", item) for index, item in enumerate(value))
+    else:
+        return []
+    for where, item in items:
+        found = _non_finite_issues(item, where)
+        if found:
+            return found
+    return []

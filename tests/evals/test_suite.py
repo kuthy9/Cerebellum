@@ -107,6 +107,22 @@ def test_non_string_expect_keys_have_a_readable_path(tmp_path):
     }
 
 
+def test_case_inputs_with_non_finite_numbers_are_rejected(tmp_path):
+    """YAML reads .nan and .inf as floats: a case input holding one would store a run the
+    dashboard could not serve as JSON."""
+    body = (
+        "suite: s\nworkflow: WORKFLOW\ncases:\n"
+        "  - {id: a, input: {order_id: A1001, amount: .nan}, expect: {status: failed}}\n"
+        "  - {id: b, input: {order_id: A1001, amount: -.inf}, expect: {status: failed}}\n"
+    )
+    with pytest.raises(SpecError) as exc:
+        load_suite(write_suite(tmp_path, body), env={})
+    assert issue_map(exc) == {
+        "cases[0].input.amount": "must be a finite number, got nan",
+        "cases[1].input.amount": "must be a finite number, got -inf",
+    }
+
+
 def test_suite_structure_errors_use_yaml_paths(tmp_path):
     path = write_suite(tmp_path, "suite: Bad Name\nworkflow: WORKFLOW\ncases: []\nextra: 1\n")
     with pytest.raises(SpecError) as exc:

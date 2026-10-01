@@ -390,3 +390,45 @@ def test_resolve_params():
     assert resolve_params(wf, {"threshold": 900}) == {"threshold": 900}
     with pytest.raises(SpecError, match="params.unknown: is not declared"):
         resolve_params(wf, {"unknown": 1})
+
+
+NAN, INF = float("nan"), float("inf")
+
+
+@pytest.mark.parametrize("value", [NAN, INF, -INF])
+def test_validate_input_rejects_non_finite_numbers(value):
+    """Review finding: NaN and the infinities are not JSON; a run that stored one in its input
+    made the dashboard's run endpoints answer 500."""
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError) as info:
+        validate_input(wf, {"order_id": "A1", "amount": value})
+    assert [str(i) for i in info.value.issues] == [
+        f"input.amount: must be a finite number, got {value!r}"
+    ]
+
+
+def test_validate_input_finds_non_finite_numbers_inside_objects_and_arrays():
+    def mutate(d):
+        d["input"]["meta"] = {"type": "object"}
+        d["input"]["lines"] = {"type": "array"}
+
+    wf = parse_workflow(variant(mutate), env={})
+    data = {
+        "order_id": "A1",
+        "amount": 1,
+        "meta": {"ok": [1, 2.5], "deep": {"list": [1, NAN]}},
+        "lines": [{"price": 3}, {"price": -INF}],
+    }
+    with pytest.raises(SpecError) as info:
+        validate_input(wf, data)
+    assert [str(i) for i in info.value.issues] == [
+        "input.meta.deep.list[1]: must be a finite number, got nan",
+        "input.lines[1].price: must be a finite number, got -inf",
+    ]
+
+
+@pytest.mark.parametrize("value", [NAN, INF, {"nested": [1, -INF]}])
+def test_resolve_params_rejects_non_finite_overrides(value):
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError, match=r"^params\.threshold[^:]*: must be a finite number"):
+        resolve_params(wf, {"threshold": value})

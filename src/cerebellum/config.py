@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import math
 import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
+
+from cerebellum.errors import ConfigError
 
 DEFAULT_HOME = ".cerebellum"
 DEFAULT_MODEL = "claude-opus-5-5"
@@ -13,6 +16,10 @@ DEFAULT_SANDBOX_HOST = "127.0.0.1"
 DEFAULT_SANDBOX_PORT = 8787
 DEFAULT_UI_HOST = "127.0.0.1"
 DEFAULT_UI_PORT = 7400
+# The ports CEREBELLUM_SANDBOX_PORT and CEREBELLUM_UI_PORT accept. Not 0 ("any free port"): the
+# CLI prints and connects to the configured port, so it must be the one actually bound.
+MIN_PORT = 1
+MAX_PORT = 65535
 DEFAULT_LEASE_SECONDS = 30.0
 DEFAULT_STEP_TIMEOUT_SECONDS = 30.0
 DEFAULT_MAX_PARALLEL = 8
@@ -80,19 +87,55 @@ class Settings:
             force_mock=env.get("CEREBELLUM_MOCK", "").strip().lower() in _TRUTHY,
             pricing_file=Path(pricing).expanduser() if pricing else None,
             sandbox_host=env.get("CEREBELLUM_SANDBOX_HOST", DEFAULT_SANDBOX_HOST),
-            sandbox_port=int(env.get("CEREBELLUM_SANDBOX_PORT", DEFAULT_SANDBOX_PORT)),
-            lease_seconds=float(env.get("CEREBELLUM_LEASE_SECONDS", DEFAULT_LEASE_SECONDS)),
+            sandbox_port=_port(env, "CEREBELLUM_SANDBOX_PORT", DEFAULT_SANDBOX_PORT),
+            lease_seconds=_seconds(env, "CEREBELLUM_LEASE_SECONDS", DEFAULT_LEASE_SECONDS),
             ui_host=env.get("CEREBELLUM_UI_HOST", DEFAULT_UI_HOST),
-            ui_port=int(env.get("CEREBELLUM_UI_PORT", DEFAULT_UI_PORT)),
-            worker_interval=float(
-                env.get("CEREBELLUM_WORKER_INTERVAL", DEFAULT_WORKER_INTERVAL_SECONDS)
+            ui_port=_port(env, "CEREBELLUM_UI_PORT", DEFAULT_UI_PORT),
+            # 0 turns the dashboard's approval-timeout sweep off
+            worker_interval=_seconds(
+                env, "CEREBELLUM_WORKER_INTERVAL", DEFAULT_WORKER_INTERVAL_SECONDS, zero=True
             ),
-            stream_poll=float(env.get("CEREBELLUM_STREAM_POLL", DEFAULT_STREAM_POLL_SECONDS)),
+            stream_poll=_seconds(env, "CEREBELLUM_STREAM_POLL", DEFAULT_STREAM_POLL_SECONDS),
         )
 
     def ensure_home(self) -> Path:
         self.home.mkdir(parents=True, exist_ok=True)
         return self.home
+
+
+def _setting(env: Mapping[str, str], name: str) -> str | None:
+    """The variable's value, or None when it is unset or empty (as for CEREBELLUM_PRICING_FILE
+    and CEREBELLUM_MOCK, an empty value means the default)."""
+    value = env.get(name, "")
+    return value if value.strip() else None
+
+
+def _port(env: Mapping[str, str], name: str, default: int) -> int:
+    raw = _setting(env, name)
+    if raw is None:
+        return default
+    try:
+        port = int(raw)
+    except ValueError:
+        port = None
+    if port is None or not MIN_PORT <= port <= MAX_PORT:
+        raise ConfigError(f"{name} must be an integer from {MIN_PORT} to {MAX_PORT}, got {raw!r}")
+    return port
+
+
+def _seconds(env: Mapping[str, str], name: str, default: float, *, zero: bool = False) -> float:
+    """A finite number of seconds: greater than 0, or 0 or more when `zero` is allowed."""
+    raw = _setting(env, name)
+    if raw is None:
+        return default
+    try:
+        seconds = float(raw)
+    except ValueError:
+        seconds = math.nan
+    if not math.isfinite(seconds) or seconds < 0 or (seconds == 0 and not zero):
+        expected = "0 or more" if zero else "greater than 0"
+        raise ConfigError(f"{name} must be a number of seconds {expected}, got {raw!r}")
+    return seconds
 
 
 def has_anthropic_credentials(

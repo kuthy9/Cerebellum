@@ -33,6 +33,26 @@ async def test_event_stream_yields_new_events_in_order(store, simple_workflow):
     assert [int(p["id"]) for p in parsed] == [1, 2]
 
 
+async def test_event_stream_sends_non_finite_numbers_as_null(store, simple_workflow):
+    """Review finding: the stream wrote NaN and Infinity into its data lines, which a browser's
+    JSON.parse refuses, so the dashboard's live updates broke on such an event."""
+    store.save_workflow(simple_workflow)
+    inputs = {"order_id": "A1", "n": float("nan")}
+    store.create_run("r_s0000002", simple_workflow, inputs, {"x": float("-inf")}, mock=True)
+    checks = iter([False, True])
+
+    async def disconnected():
+        return next(checks)
+
+    def refuse(token):
+        raise AssertionError(f"{token} in the stream")
+
+    frames = [f async for f in event_stream(store, after=0, poll=0, is_disconnected=disconnected)]
+    [started] = [json.loads(fields(frame)["data"], parse_constant=refuse) for frame in frames[1:]]
+    assert started["data"]["input"] == {"order_id": "A1", "n": None}
+    assert started["data"]["params"] == {"x": None}
+
+
 async def test_event_stream_sends_keepalives_while_idle(store):
     checks = iter([False, False, False, True])
 

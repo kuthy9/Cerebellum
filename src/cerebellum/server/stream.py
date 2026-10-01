@@ -4,11 +4,10 @@ processes (the CLI), because the stream polls the shared event table."""
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import AsyncIterator, Awaitable, Callable
 
 from cerebellum.runtime.store import Store
-from cerebellum.server.serialize import event_json
+from cerebellum.server.serialize import dumps, event_json
 
 
 async def event_stream(
@@ -26,7 +25,7 @@ async def event_stream(
         events = store.events_since(seq)
         for event in events:
             seq = event.seq
-            yield f"id: {event.seq}\ndata: {json.dumps(event_json(event), default=str)}\n\n"
+            yield f"id: {event.seq}\ndata: {dumps(event_json(event), default=str)}\n\n"
         if events:
             idle = 0
             continue

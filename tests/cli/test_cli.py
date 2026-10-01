@@ -266,6 +266,25 @@ def test_param_values_keep_non_finite_numbers_as_text(text):
     assert cli._parse_params([f"limit={text}"]) == {"limit": text}
 
 
+@pytest.mark.parametrize("bad", ["NaN", "Infinity", "-Infinity", "1e400", "-1e400"])
+def test_run_rejects_non_finite_numbers_in_input(runner, tmp_path, bad):
+    """Review finding: --input accepted NaN and the infinities (and read 1e400 as one); the run
+    it stored made the dashboard's run endpoints answer 500."""
+    documents = (
+        f'{{"order_id": "A1001", "amount": {bad}}}',
+        f'{{"order_id": "A1001", "amount": 10, "notes": {{"lines": [1, {bad}]}}}}',
+    )
+    for position, text in enumerate(documents):
+        path = tmp_path / f"input{position}.json"
+        path.write_text(text, encoding="utf-8")
+        for raw in (text, f"@{path}"):
+            result = invoke(runner, "run", WORKFLOW, "-i", raw)
+            assert result.exit_code == 2, (raw, result.text)
+            assert isinstance(result.exception, SystemExit), raw
+            assert "input is not valid JSON" in result.text and bad in result.text, raw
+    assert "no runs yet" in invoke(runner, "runs").text
+
+
 def test_run_stores_a_non_finite_param_as_text(runner):
     result = invoke(
         runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'small.json'}", "-p", "approval_threshold=NaN"
@@ -370,6 +389,22 @@ def test_a_bad_pricing_file_is_a_clear_error(runner, tmp_path, monkeypatch):
     assert result.exit_code == 1, result.text
     assert isinstance(result.exception, SystemExit)  # handled, not a traceback
     assert "CEREBELLUM_PRICING_FILE" in result.text and "not valid JSON" in result.text
+
+
+def test_a_bad_numeric_setting_is_a_clear_error(runner, monkeypatch):
+    """Review finding: CEREBELLUM_SANDBOX_PORT=abc ended every command in a ValueError
+    traceback."""
+    monkeypatch.setenv("CEREBELLUM_SANDBOX_PORT", "abc")
+    fake_server(monkeypatch)
+    commands = (("runs",), ("tasks",), ("ui", "--no-sandbox", "--mock"), ("run", WORKFLOW))
+    for command in commands:
+        result = invoke(runner, *command)
+        assert result.exit_code == 1, (command, result.text)
+        assert isinstance(result.exception, SystemExit), command  # handled, not a traceback
+        assert "CEREBELLUM_SANDBOX_PORT must be an integer from 1 to 65535, got 'abc'" in (
+            result.text
+        )
+        assert "Traceback" not in result.text
 
 
 def test_a_corrupt_database_is_a_clear_error(runner, tmp_path, monkeypatch):

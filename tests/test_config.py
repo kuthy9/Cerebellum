@@ -1,6 +1,14 @@
 from pathlib import Path
 
-from cerebellum.config import DEFAULT_MODEL, Settings, has_anthropic_credentials
+import pytest
+
+from cerebellum.config import (
+    DEFAULT_MODEL,
+    DEFAULT_SANDBOX_PORT,
+    Settings,
+    has_anthropic_credentials,
+)
+from cerebellum.errors import ConfigError
 
 
 def test_defaults_when_env_is_empty():
@@ -65,3 +73,59 @@ def test_dashboard_settings_have_defaults_and_env_overrides():
     )
     assert (custom.ui_host, custom.ui_port) == ("0.0.0.0", 9000)
     assert custom.worker_interval == 5.0 and custom.stream_poll == 0.1
+
+
+NOT_A_NUMBER = ("abc", "nan", "NaN", "inf", "-Infinity", "1e400")
+
+
+@pytest.mark.parametrize(
+    "name, value",
+    [
+        *[("CEREBELLUM_SANDBOX_PORT", v) for v in (*NOT_A_NUMBER, "8787.5", "0", "-1", "65536")],
+        *[("CEREBELLUM_UI_PORT", v) for v in (*NOT_A_NUMBER, "7400.0", "0", "70000")],
+        *[("CEREBELLUM_LEASE_SECONDS", v) for v in (*NOT_A_NUMBER, "0", "-5")],
+        *[("CEREBELLUM_STREAM_POLL", v) for v in (*NOT_A_NUMBER, "0", "-0.5")],
+        *[("CEREBELLUM_WORKER_INTERVAL", v) for v in (*NOT_A_NUMBER, "-1")],
+    ],
+)
+def test_a_bad_numeric_setting_is_a_config_error_naming_it(name, value):
+    """Review finding: int()/float() on these variables ended every command in a ValueError
+    traceback, and float() let nan, inf and negative seconds through to leases and polling."""
+    with pytest.raises(ConfigError) as caught:
+        Settings.from_env({name: value})
+    assert name in str(caught.value) and repr(value) in str(caught.value)
+
+
+def test_a_bad_port_says_what_is_expected():
+    with pytest.raises(ConfigError) as caught:
+        Settings.from_env({"CEREBELLUM_SANDBOX_PORT": "abc"})
+    assert str(caught.value) == (
+        "CEREBELLUM_SANDBOX_PORT must be an integer from 1 to 65535, got 'abc'"
+    )
+
+
+def test_numeric_settings_accept_their_whole_range():
+    edges = Settings.from_env(
+        {
+            "CEREBELLUM_SANDBOX_PORT": "1",
+            "CEREBELLUM_UI_PORT": " 65535 ",
+            "CEREBELLUM_LEASE_SECONDS": "0.5",
+            "CEREBELLUM_WORKER_INTERVAL": "0",  # 0 turns the dashboard's sweep off
+            "CEREBELLUM_STREAM_POLL": "1e-3",
+        }
+    )
+    assert (edges.sandbox_port, edges.ui_port) == (1, 65535)
+    assert (edges.lease_seconds, edges.worker_interval, edges.stream_poll) == (0.5, 0.0, 0.001)
+
+
+def test_an_empty_numeric_setting_means_unset():
+    """Like an empty CEREBELLUM_PRICING_FILE or CEREBELLUM_MOCK, an empty value is the default."""
+    names = (
+        "CEREBELLUM_SANDBOX_PORT",
+        "CEREBELLUM_UI_PORT",
+        "CEREBELLUM_LEASE_SECONDS",
+        "CEREBELLUM_WORKER_INTERVAL",
+        "CEREBELLUM_STREAM_POLL",
+    )
+    assert Settings.from_env(dict.fromkeys(names, "")) == Settings.from_env({})
+    assert Settings.from_env({"CEREBELLUM_SANDBOX_PORT": "  "}).sandbox_port == DEFAULT_SANDBOX_PORT

@@ -11,6 +11,8 @@ from typing import Any
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -18,8 +20,10 @@ from fastapi.responses import (
     PlainTextResponse,
     StreamingResponse,
 )
+from fastapi.routing import APIRoute
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from starlette.routing import Match
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from cerebellum import __version__
@@ -78,6 +82,29 @@ class HostGuard:
                 await PlainTextResponse("unknown host", status_code=400)(scope, receive, send)
                 return
         await self.app(scope, receive, send)
+
+
+def is_api_path(path: str) -> bool:
+    """Whether the UI route's `path` (no leading slash) is under the JSON API."""
+    return path == "api" or path.startswith("api/")
+
+
+class UIRoute(APIRoute):
+    """The UI's catch-all route (GET and HEAD). Under /api it only ever matches partially, like a
+    route for another method, so a JSON API route that has the path is always chosen first: GET
+    or HEAD on POST /api/runs/{id}/resume answers 405 naming POST. Only on /api paths no API
+    route has does it answer: 404 for GET and, as the API never answers HEAD, 405 naming GET."""
+
+    def matches(self, scope: Scope) -> tuple[Match, Scope]:
+        match, child_scope = super().matches(scope)
+        if match is Match.FULL and is_api_path(child_scope["path_params"]["path"]):
+            return Match.PARTIAL, child_scope
+        return match, child_scope
+
+    async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if is_api_path(scope["path_params"]["path"]) and scope["method"] != "GET":
+            raise HTTPException(405, headers={"Allow": "GET"})
+        await super().handle(scope, receive, send)
 
 
 def dashboard_server(app: FastAPI, *, host: str, port: int) -> uvicorn.Server:
@@ -154,6 +181,7 @@ def create_app(
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
         redoc_url=None,
+        default_response_class=js.APIResponse,
     )
     if allowed_hosts is not None:
         app.add_middleware(HostGuard, allowed=allowed_hosts)
@@ -161,13 +189,18 @@ def create_app(
     @app.exception_handler(CerebellumError)
     async def cerebellum_error(request: Request, exc: CerebellumError) -> JSONResponse:
         if isinstance(exc, NotFound):
-            return JSONResponse({"detail": str(exc)}, status_code=404)
+            return js.APIResponse({"detail": str(exc)}, status_code=404)
         if isinstance(exc, SpecError):
             issues = [{"path": issue.path, "message": issue.message} for issue in exc.issues]
-            return JSONResponse(
+            return js.APIResponse(
                 {"detail": {"message": str(exc), "issues": issues}}, status_code=400
             )
-        return JSONResponse({"detail": str(exc)}, status_code=409)
+        return js.APIResponse({"detail": str(exc)}, status_code=409)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # FastAPI's own handler, but its errors echo the input, which may be NaN or Infinity
+        return js.APIResponse({"detail": jsonable_encoder(exc.errors())}, status_code=422)
 
     def parts(request: Request) -> tuple[Store, Worker, Catalog]:
         state = request.app.state
@@ -367,12 +400,8 @@ def create_app(
     if (static_dir / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
 
-    # HEAD too: FastAPI routes, unlike plain Starlette ones, do not add it to GET.
-    @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
-    async def ui(path: str, request: Request):
-        if path == "api" or path.startswith("api/"):
-            if request.method == "HEAD":  # the JSON API answers GET only, as before
-                raise HTTPException(405, headers={"Allow": "GET"})
+    async def ui(path: str):
+        if is_api_path(path):
             raise HTTPException(404, "not found")
         root = static_dir.resolve()
         index = root / "index.html"
@@ -390,4 +419,12 @@ def create_app(
             return FileResponse(index, headers=INDEX_HEADERS)
         return HTMLResponse(UI_MISSING)
 
+    # HEAD too: FastAPI routes, unlike plain Starlette ones, do not add it to GET.
+    app.router.add_api_route(
+        "/{path:path}",
+        ui,
+        methods=["GET", "HEAD"],
+        include_in_schema=False,
+        route_class_override=UIRoute,
+    )
     return app
