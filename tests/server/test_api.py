@@ -327,6 +327,27 @@ def test_starting_a_run_nested_too_deeply_is_refused(store, settings, tmp_path, 
             assert "nested more than" in refused.text
 
 
+@pytest.mark.parametrize("depth", [600, 3000, 9000])
+@pytest.mark.parametrize(
+    ("path", "template"),
+    [
+        ("/api/runs", "{deep}"),
+        ("/api/runs", '{{"workflow": "free.yaml", "input": {deep}}}'),
+        ("/api/runs", '{{"workflow": {deep}}}'),
+        ("/api/approvals/a_1/decision", '{{"approved": {deep}, "by": "x"}}'),
+    ],
+)
+def test_a_deeply_nested_body_that_fails_validation_is_a_422(client, store, path, template, depth):
+    """Review finding: the 422 handler echoed the invalid input back, and encoding a deeply
+    nested one raised RecursionError: a 500 instead of a 422."""
+    deep = "[" * depth + "]" * depth
+    body = template.format(deep=deep)
+    refused = client.post(path, content=body, headers={"content-type": "application/json"})
+    assert refused.status_code == 422, (refused.status_code, refused.text[:300])
+    strict_json(refused)
+    assert store.list_runs() == []
+
+
 def test_the_catalog_skips_files_nested_too_deeply(store, settings, tmp_path):
     """A workflow YAML or sample input nested too deeply is left out, not a 500."""
     deep = "[" * 100000 + "]" * 100000

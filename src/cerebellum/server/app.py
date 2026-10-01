@@ -41,6 +41,7 @@ from cerebellum.server.catalog import Catalog
 from cerebellum.server.stream import event_stream
 from cerebellum.server.worker import Worker
 from cerebellum.spec.durations import parse_duration
+from cerebellum.spec.inputs import TOO_DEEP, nests_deeper_than
 
 STATIC_DIR = Path(__file__).parent / "static"
 # Names of this machine; a dashboard bound to loopback only answers requests addressed to them
@@ -264,8 +265,13 @@ def create_app(
 
     @app.exception_handler(RequestValidationError)
     async def invalid_request(request: Request, exc: RequestValidationError) -> JSONResponse:
-        # FastAPI's own handler, but its errors echo the input, which may be NaN or Infinity
-        return js.APIResponse({"detail": jsonable_encoder(exc.errors())}, status_code=422)
+        # FastAPI's own handler, but its errors echo the input, which may be NaN or Infinity, or
+        # nested too deeply to encode (a RecursionError): such an input is described instead.
+        errors = [
+            {**error, "input": f"<{TOO_DEEP}>"} if nests_deeper_than(error.get("input")) else error
+            for error in exc.errors()
+        ]
+        return js.APIResponse({"detail": jsonable_encoder(errors)}, status_code=422)
 
     def parts(request: Request) -> tuple[Store, Worker, Catalog]:
         state = request.app.state
