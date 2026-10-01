@@ -125,6 +125,22 @@ def test_baseline_is_the_latest_completed_run_with_the_same_ai_mode(store, clock
     assert store.latest_eval_run("other", mock=False) is None
 
 
+def test_newest_eval_runs_of_each_suite(store, clock):
+    for index in range(3):
+        clock.advance(1)
+        make_eval(store, f"ev_a000000{index}", suite="a")
+    for index in range(5):
+        clock.advance(1)
+        make_eval(store, f"ev_b000000{index}", suite="b")
+    assert [r.id for r in store.list_eval_runs_per_suite(2)] == [
+        "ev_b0000004",
+        "ev_b0000003",
+        "ev_a0000002",
+        "ev_a0000001",
+    ]
+    assert len(store.list_eval_runs_per_suite(10)) == 8
+
+
 def test_running_eval_without_a_recent_heartbeat_is_stale(store, clock):
     """Review finding: a killed eval stayed "running" forever, with no liveness signal."""
     record = make_eval(store)

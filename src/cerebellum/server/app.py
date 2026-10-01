@@ -38,7 +38,7 @@ from cerebellum.spec.durations import parse_duration
 STATIC_DIR = Path(__file__).parent / "static"
 # Names of this machine; a dashboard bound to one of them only answers requests addressed to them.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
-# How many runs of a suite the eval detail returns for its trend line.
+# How many runs of each suite the eval list and the eval detail return for their trend lines.
 EVAL_HISTORY = 30
 UI_MISSING = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Cerebellum</title></head>
@@ -290,9 +290,14 @@ def create_app(
         return js.eval_run_json(record, stale=stale)
 
     @app.get("/api/evals")
-    async def list_evals(request: Request, suite: str | None = None, limit: int = 100):
+    async def list_evals(request: Request, suite: str | None = None, limit: int = EVAL_HISTORY):
+        """The newest `limit` runs of each suite (or of `suite`), newest first."""
         active, _, _ = parts(request)
-        records = active.list_eval_runs(suite=suite, limit=min(max(limit, 1), 500))
+        limit = min(max(limit, 1), 500)
+        if suite is None:
+            records = active.list_eval_runs_per_suite(limit)
+        else:
+            records = active.list_eval_runs(suite=suite, limit=limit)
         return {"evals": [eval_json(active, record) for record in records]}
 
     @app.get("/api/evals/{eval_run_id}")

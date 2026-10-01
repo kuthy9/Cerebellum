@@ -152,6 +152,11 @@ CREATE TABLE IF NOT EXISTS eval_results (
 """
 
 UNSET: Any = object()
+# Eval run ids by their rank within their suite (1 = newest); format with a comparison operator.
+_EVAL_RANK = (
+    "SELECT id FROM (SELECT id, ROW_NUMBER() OVER (PARTITION BY suite "
+    "ORDER BY created_at DESC, rowid DESC) AS n FROM eval_runs) WHERE n {} ?"
+)
 
 
 def _json_default(value: Any) -> Any:
@@ -1174,13 +1179,21 @@ class Store:
         )
         return [_eval_run(row) for row in rows]
 
+    def list_eval_runs_per_suite(self, limit: int) -> list[EvalRunRecord]:
+        """The newest `limit` eval runs of every suite, newest first: a suite run rarely is not
+        crowded out by suites run often."""
+        rows = self._rows(
+            f"SELECT * FROM eval_runs WHERE id IN ({_EVAL_RANK.format('<=')}) "
+            "ORDER BY created_at DESC, rowid DESC",
+            (limit,),
+        )
+        return [_eval_run(row) for row in rows]
+
     def eval_runs_beyond(self, keep: int) -> list[EvalRunRecord]:
         """Every eval run except the newest `keep` of each suite: by suite, newest first."""
         rows = self._rows(
-            "SELECT * FROM eval_runs WHERE id IN ("
-            "SELECT id FROM (SELECT id, ROW_NUMBER() OVER ("
-            "PARTITION BY suite ORDER BY created_at DESC, rowid DESC) AS n FROM eval_runs) "
-            "WHERE n > ?) ORDER BY suite, created_at DESC, rowid DESC",
+            f"SELECT * FROM eval_runs WHERE id IN ({_EVAL_RANK.format('>')}) "
+            "ORDER BY suite, created_at DESC, rowid DESC",
             (keep,),
         )
         return [_eval_run(row) for row in rows]

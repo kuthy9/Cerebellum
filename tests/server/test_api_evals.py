@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 from cerebellum.ai.mock import MockProvider
 from cerebellum.evals import EvalRunner, load_suite
 from cerebellum.sandbox.payments import PaymentsState, create_payments_app
-from cerebellum.server.app import create_app
+from cerebellum.server.app import EVAL_HISTORY, create_app
 from cerebellum.templates import template_path
 
 WORKFLOW = template_path("refund") / "workflow.yaml"
@@ -100,6 +100,36 @@ def test_eval_json_says_when_a_running_eval_lost_its_process(client, store, sett
     assert stale["status"] == "running" and stale["stale"] is True
     detail = client.get("/api/evals/ev_00000001").json()
     assert detail["eval"]["stale"] is True and detail["history"][0]["stale"] is True
+
+
+def test_eval_list_returns_the_newest_runs_of_every_suite(client, store, clock):
+    """Review finding: the list returned the newest 100 runs overall, so a suite whose last run
+    was older than 100 runs of other suites vanished from the Evals page."""
+
+    def make(eval_run_id, suite):
+        clock.advance(1)
+        store.create_eval_run(
+            eval_run_id,
+            suite=suite,
+            suite_path="/x/evals.yaml",
+            workflow_name="wf",
+            workflow_digest="d1",
+            mock=True,
+            total=1,
+            baseline_id=None,
+        )
+        store.finish_eval_run(eval_run_id, status="completed")
+
+    make("ev_a0000000", "quiet")
+    busy = [f"ev_{index:08x}" for index in range(EVAL_HISTORY + 1)]
+    for eval_run_id in busy:
+        make(eval_run_id, "busy")
+    listed = [e["id"] for e in client.get("/api/evals").json()["evals"]]
+    assert listed == [*reversed(busy[1:]), "ev_a0000000"]  # newest first, as the UI groups
+    limited = [e["id"] for e in client.get("/api/evals?limit=2").json()["evals"]]
+    assert limited == [busy[-1], busy[-2], "ev_a0000000"]
+    only = client.get("/api/evals?suite=busy&limit=3").json()["evals"]
+    assert [e["id"] for e in only] == busy[:-4:-1]
 
 
 def test_unknown_eval_is_404(client):
