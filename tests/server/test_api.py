@@ -546,6 +546,33 @@ def test_post_only_api_routes_answer_get_and_head_with_405_naming_post(store, se
         assert index.status_code == 200 and index.headers.get("cache-control") == "no-cache"
 
 
+def test_a_405_on_an_api_path_names_every_method_the_path_has(store, settings, tmp_path):
+    """Review finding: PUT and HEAD /api/runs answered 405 Allow: GET although POST /api/runs
+    exists: only the first route of a path shared by several was named."""
+    app = app_with(store, settings, tmp_path, make_static(tmp_path))
+    methods: dict[str, set[str]] = {}
+    for route in app.routes:
+        if route.path.startswith("/api/") and getattr(route, "methods", None):
+            methods.setdefault(route.path, set()).update(route.methods)
+    assert methods["/api/runs"] == {"GET", "POST"}
+    with TestClient(app) as c:
+        for method in ("PUT", "DELETE", "PATCH", "HEAD"):
+            answer = c.request(method, "/api/runs")
+            assert answer.status_code == 405, (method, answer.status_code)
+            assert answer.headers.get("allow") == "GET, POST", method
+        for template, allowed in methods.items():
+            path = re.sub(r"\{[^}]+\}", "x_12345678", template)
+            for method in sorted({"GET", "POST", "PUT", "DELETE", "PATCH", "HEAD"} - allowed):
+                answer = c.request(method, path)
+                assert answer.status_code == 405, (method, path, answer.status_code)
+                named = set(answer.headers.get("allow", "").split(", "))
+                assert named == allowed, (method, path, named)
+        assert c.get("/api/nope").status_code == 404  # unknown /api paths: as before
+        for method in ("HEAD", "PUT", "POST"):
+            answer = c.request(method, "/api/nope")
+            assert answer.status_code == 405 and answer.headers.get("allow") == "GET", method
+
+
 def test_paths_the_filesystem_rejects_fall_back_to_the_ui(store, settings, tmp_path):
     app = app_with(store, settings, tmp_path, make_static(tmp_path))
     with TestClient(app, raise_server_exceptions=False) as c:

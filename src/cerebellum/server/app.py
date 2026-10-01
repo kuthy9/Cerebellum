@@ -149,6 +149,28 @@ class UIRoute(APIRoute):
         await super().handle(scope, receive, send)
 
 
+def path_methods(scope: Scope) -> list[str]:
+    """Every method the request's path answers, across all the routes that have the path (GET
+    and POST /api/runs are two), never the UI catch-all's."""
+    methods: set[str] = set()
+    for route in scope["app"].router.routes:
+        if isinstance(route, UIRoute) or not getattr(route, "methods", None):
+            continue
+        if route.matches(scope)[0] is not Match.NONE:
+            methods.update(route.methods)
+    return sorted(methods)
+
+
+class APIPathRoute(APIRoute):
+    """A JSON API route. A method it does not have is 405 naming every method of its path (all
+    the routes that share it), where Starlette names only the first route's."""
+
+    async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self.methods and scope["method"] not in self.methods:
+            raise HTTPException(405, headers={"Allow": ", ".join(path_methods(scope))})
+        await super().handle(scope, receive, send)
+
+
 def dashboard_server(app: FastAPI, *, host: str, port: int) -> uvicorn.Server:
     """The uvicorn server `cerebellum ui` runs. Event streams end as soon as it starts stopping,
     so open browser tabs never hold up Ctrl-C."""
@@ -225,6 +247,7 @@ def create_app(
         redoc_url=None,
         default_response_class=js.APIResponse,
     )
+    app.router.route_class = APIPathRoute  # every route below but the UI's
     if allowed_hosts is not None:
         app.add_middleware(HostGuard, allowed=allowed_hosts)
 
