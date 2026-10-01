@@ -107,8 +107,9 @@ sandboxed Jinja over `input`, `params`, `steps.<id>.{output,status,error}` and `
   `show` list. Anything else is a validation error such as `step 'check' is not upstream of
   'audit'`. Fallbacks and the workflow `output` may reference any step.
 - Run input is strict: keys not declared under `input:` are rejected (a workflow without
-  `input:` accepts only `{}`), and so are `NaN`, `Infinity` and numbers out of range such as
-  `1e400` anywhere in input or param overrides. `--param k=v` values are JSON (`5`, `true`,
+  `input:` accepts only `{}`), and so are `NaN`, `Infinity`, numbers out of range such as
+  `1e400`, and values nested more than 100 levels deep, anywhere in input or param overrides
+  (whole workflow and eval-suite files have the same depth limit). `--param k=v` values are JSON (`5`, `true`,
   `"x"`, `[1]`); anything else, including `no`, `010` and `NaN`, stays text.
 - Conditions (`when`, validation rules, eval `assert`) are lenient: a missing value is false.
   Value templates (`params`, `body`, `prompt`, …) are strict: a missing value fails the step, so
@@ -163,7 +164,7 @@ cerebellum ui            # http://127.0.0.1:7400 — also starts the sandbox pay
 
 The demo refunds orders A1001–A1005, so a second refund of those is (correctly) refused by the policy check; start your own runs with the untouched orders A1008–A1012.
 
-The dashboard reads the same SQLite store as the CLI, so runs started or approved in a terminal appear live. Its JSON API and event stream send a stored `NaN` or infinite number (for example from a query result or AI output) as `null`; the CLI shows the stored value. It binds to `127.0.0.1` and has no authentication — it is a local tool, and `--host` with any other address prints a warning. When it falls back to the mock AI, a banner says whether that was requested (`--mock` / `CEREBELLUM_MOCK`) or caused by missing credentials. The UI ships prebuilt inside the Python package; `make ui` rebuilds it (Node 20.19+), and the page is served with `Cache-Control: no-cache`, so a reload picks up the rebuild.
+The dashboard reads the same SQLite store as the CLI, so runs started or approved in a terminal appear live. Its JSON API and event stream send a stored `NaN` or infinite number (for example from a query result or AI output) as `null`; the CLI shows the stored value. It binds to `127.0.0.1` and has no authentication — it is a local tool. On any loopback host (`localhost`, `127.0.0.1`, `::1` in any spelling) it answers only requests addressed to this machine, against DNS rebinding; `--host` with any other address prints a warning. `--port` must be 1–65535, and a server that cannot start (port in use, unknown host) exits 1. When it falls back to the mock AI, a banner says whether that was requested (`--mock` / `CEREBELLUM_MOCK`) or caused by missing credentials. The UI ships prebuilt inside the Python package; `make ui` rebuilds it (Node 20.19+), and the page is served with `Cache-Control: no-cache`, so a reload picks up the rebuild.
 
 ## Evals
 
@@ -230,7 +231,7 @@ credentials; there is no offline fallback.
 | `cerebellum validate <wf>` / `show <wf>` | Check a definition / print its steps |
 | `cerebellum run <wf> -i @input.json [--param k=v] [--sandbox] [--mock]` | Start a run (exit 3 while waiting for approval) |
 | `cerebellum runs [--evals]` / `status <run>` / `trace <run>` | Observe runs, steps and span waterfalls (`status` needs no connector variables) |
-| `cerebellum approvals` / `approve <run>` / `reject <run> [--no-resume]` | Human-in-the-loop decisions |
+| `cerebellum approvals` / `approve <run>` / `reject <run> [--no-resume]` | Human-in-the-loop decisions (hints add `--sandbox` when the run's payments API is the local sandbox) |
 | `cerebellum resume <run>` | Continue after a crash, a failure or an approval |
 | `cerebellum tasks [resolve <id>]` | Manual tasks opened by fallbacks |
 | `cerebellum connectors check <wf>` | Health-check every connector |
@@ -252,7 +253,7 @@ workflow, input, eval suite or option, `3` the run is waiting for a human approv
 |---|---|---|
 | `ANTHROPIC_API_KEY` | — | Enables the Claude provider (otherwise mock AI) |
 | `CEREBELLUM_MODEL` | `claude-opus-5-5` | Default model for `ai` steps |
-| `CEREBELLUM_MOCK` | unset | `1` forces the mock AI |
+| `CEREBELLUM_MOCK` | unset | `1`/`true`/`yes`/`on` forces the mock AI (`0`/`false`/`no`/`off` does not; anything else is an error) |
 | `CEREBELLUM_HOME` | `./.cerebellum` | Run history and sandbox databases |
 | `CEREBELLUM_SANDBOX_HOST` / `CEREBELLUM_SANDBOX_PORT` | `127.0.0.1` / `8787` | Address of the local payments sandbox |
 | `CEREBELLUM_LEASE_SECONDS` | `30` | How long a run's lease (and an eval's heartbeat) lasts without renewal (crash detection) |
@@ -265,8 +266,8 @@ workflow, input, eval suite or option, `3` the run is waiting for a human approv
 
 Ports must be integers from 1 to 65535, `CEREBELLUM_LEASE_SECONDS` and `CEREBELLUM_STREAM_POLL`
 finite numbers above 0, and `CEREBELLUM_WORKER_INTERVAL` 0 or more (`0` turns the sweep off). A
-bad value stops every command with exit code 1 and a message naming the variable. An empty
-`CEREBELLUM_*` value means the default.
+bad value stops every command with exit code 1 and a message naming the variable. Values are
+trimmed, and an empty `CEREBELLUM_*` value means the default.
 
 ## Architecture
 
