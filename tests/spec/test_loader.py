@@ -1,0 +1,503 @@
+import copy
+
+import pytest
+import yaml
+
+from cerebellum.config import MAX_NESTING_DEPTH
+from cerebellum.errors import SpecError
+from cerebellum.spec import load_workflow, parse_workflow, resolve_params, validate_input
+from cerebellum.spec.models import AiStep, HttpStep
+
+BASE = {
+    "name": "demo",
+    "params": {"threshold": 100},
+    "input": {
+        "order_id": {"type": "string", "required": True},
+        "amount": {"type": "number", "required": True},
+        "tier": {"type": "string", "enum": ["gold", "silver"]},
+    },
+    "connectors": {
+        "db": {"type": "postgres", "dsn": "sandbox"},
+        "api": {"type": "rest", "base_url": "${API_URL:-http://127.0.0.1:9}"},
+    },
+    "steps": [
+        {
+            "id": "load",
+            "type": "query",
+            "connector": "db",
+            "sql": "SELECT 1 AS one",
+            "expect": "one",
+        },
+        {
+            "id": "check",
+            "type": "validate",
+            "needs": ["load"],
+            "rules": [{"expr": "steps.load.output.one == 1", "message": "one must be 1"}],
+        },
+        {
+            "id": "call",
+            "type": "http",
+            "needs": ["check"],
+            "connector": "api",
+            "method": "POST",
+            "path": "/x",
+            "body": {"id": "{{ input.order_id }}"},
+            "retry": {"max": 2, "base": "200ms"},
+            "on_failure": {"fallback": "manual"},
+        },
+    ],
+    "fallbacks": [{"id": "manual", "type": "task", "title": "Handle {{ input.order_id }}"}],
+    "output": {"code": "{{ steps.call.output.status }}"},
+}
+
+
+def dump(data):
+    return yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+
+
+def variant(mutate):
+    data = copy.deepcopy(BASE)
+    mutate(data)
+    return dump(data)
+
+
+def issues_of(text, env=None):
+    with pytest.raises(SpecError) as info:
+        parse_workflow(text, env=env or {})
+    return [str(issue) for issue in info.value.issues]
+
+
+def test_parse_valid_workflow(tmp_path):
+    wf = parse_workflow(dump(BASE), base_dir=tmp_path, env={})
+    assert wf.name == "demo"
+    assert wf.step_ids == ["load", "check", "call"]
+    assert wf.fallback_ids == ["manual"]
+    assert wf.is_fallback("manual") and not wf.is_fallback("call")
+    assert wf.connectors["api"].base_url == "http://127.0.0.1:9"
+    call = wf.step("call")
+    assert isinstance(call, HttpStep)
+    assert call.retry.base == pytest.approx(0.2)
+    assert call.timeout == 30.0
+    assert len(wf.digest) == 16
+    assert wf.base_dir == str(tmp_path)
+    assert wf.source_yaml.startswith("name: demo")
+
+
+def test_digest_depends_on_text_and_base_dir(tmp_path):
+    a = parse_workflow(dump(BASE), base_dir=tmp_path, env={})
+    b = parse_workflow(dump(BASE), base_dir=tmp_path / "other", env={})
+    assert a.digest != b.digest
+
+
+def test_load_workflow_from_file(tmp_path):
+    path = tmp_path / "wf.yaml"
+    path.write_text(dump(BASE), encoding="utf-8")
+    wf = load_workflow(path, env={"API_URL": "https://payments.example"})
+    assert wf.connectors["api"].base_url == "https://payments.example"
+    assert wf.base_dir == str(tmp_path.resolve())
+
+
+def test_missing_file_is_a_spec_error(tmp_path):
+    with pytest.raises(SpecError, match="cannot read file"):
+        load_workflow(tmp_path / "missing.yaml")
+
+
+def test_missing_env_var_without_default():
+    text = variant(lambda d: d["connectors"]["api"].update(base_url="${PAYMENTS_URL}"))
+    assert issues_of(text) == [
+        "connectors.api.base_url: environment variable PAYMENTS_URL is not set"
+    ]
+
+
+def test_unset_env_vars_stay_unresolved_when_not_required():
+    """For display only: the workflow parses, unset variables are kept as written."""
+    text = variant(
+        lambda d: d["connectors"]["api"].update(base_url="${PAYMENTS_URL}/v1${SUFFIX:-}")
+    )
+    wf = parse_workflow(text, env={}, require_env=False)
+    assert wf.connectors["api"].base_url == "${PAYMENTS_URL}/v1"
+    resolved = parse_workflow(text, env={"PAYMENTS_URL": "https://p.example"}, require_env=False)
+    assert resolved.connectors["api"].base_url == "https://p.example/v1"
+
+
+def test_invalid_yaml():
+    assert issues_of("name: [unclosed")[0].startswith("<yaml>:")
+
+
+def test_root_must_be_mapping():
+    assert issues_of("- a\n- b\n") == ["<root>: workflow must be a YAML mapping"]
+
+
+def test_structural_error_has_a_path():
+    def drop_sql(d):
+        del d["steps"][0]["sql"]
+
+    issues = issues_of(variant(drop_sql))
+    assert any(issue.startswith("steps[0]") and "sql" in issue for issue in issues)
+
+
+def test_structural_error_paths_omit_the_union_tag():
+    def mutate(d):
+        del d["steps"][0]["sql"]
+        d["steps"][0]["query"] = "a field named like the tag"
+        d["steps"][2]["query"] = "not a mapping"
+        d["steps"][2]["query_typo"] = 1
+        del d["connectors"]["db"]["dsn"]
+        d["fallbacks"][0]["query"] = 1
+
+    issues = issues_of(variant(mutate))
+    assert "steps[0].sql: Field required" in issues
+    assert "steps[0].query: Extra inputs are not permitted" in issues
+    assert "steps[2].query: Input should be a valid dictionary" in issues
+    assert "steps[2].query_typo: Extra inputs are not permitted" in issues
+    assert "connectors.db.dsn: Field required" in issues
+    assert "fallbacks[0].query: Extra inputs are not permitted" in issues
+    assert not any(".query.sql" in i or ".http." in i or ".postgres." in i for i in issues)
+
+
+def test_non_string_mapping_keys_have_a_readable_path():
+    def mutate(d):
+        d["params"][1] = "x"
+        d["connectors"][2] = {"type": "rest", "base_url": "http://127.0.0.1:9"}
+
+    issues = issues_of(variant(mutate))
+    assert "params (key 1): Input should be a valid string" in issues
+    assert "connectors (key 2): Input should be a valid string" in issues
+
+
+def test_duplicate_ids():
+    text = variant(lambda d: d["fallbacks"].append({"id": "load", "type": "task", "title": "x"}))
+    assert "fallbacks[1].id: duplicate step id 'load'" in issues_of(text)
+
+
+def test_unknown_dependency():
+    text = variant(lambda d: d["steps"][1].update(needs=["nope"]))
+    assert "steps[1].needs: unknown step 'nope'" in issues_of(text)
+
+
+def test_dependency_on_fallback_is_rejected():
+    text = variant(lambda d: d["steps"][1].update(needs=["manual"]))
+    assert "steps[1].needs: 'manual' is a fallback step and cannot be a dependency" in issues_of(
+        text
+    )
+
+
+def test_cycle_is_rejected():
+    text = variant(lambda d: d["steps"][0].update(needs=["call"]))
+    assert any(issue.startswith("steps: dependency cycle") for issue in issues_of(text))
+
+
+def test_unknown_fallback():
+    text = variant(lambda d: d["steps"][2].update(on_failure={"fallback": "ghost"}))
+    assert any("unknown fallback 'ghost'" in issue for issue in issues_of(text))
+
+
+def test_fallback_restrictions():
+    def mutate(d):
+        d["fallbacks"][0].update(needs=["load"], when="true")
+
+    issues = issues_of(variant(mutate))
+    assert "fallbacks[0].needs: fallback steps cannot declare needs" in issues
+    assert "fallbacks[0].when: fallback steps cannot declare when" in issues
+
+
+def test_fallback_used_twice():
+    text = variant(lambda d: d["steps"][1].update(on_failure={"fallback": "manual"}))
+    assert any("already used by step 'check'" in issue for issue in issues_of(text))
+
+
+def test_connector_type_mismatch():
+    text = variant(lambda d: d["steps"][0].update(connector="api"))
+    expected = "steps[0].connector: step type 'query' needs a 'postgres' connector, 'api' is 'rest'"
+    assert expected in issues_of(text)
+
+
+def test_unknown_connector():
+    text = variant(lambda d: d["steps"][0].update(connector="warehouse"))
+    assert "steps[0].connector: unknown connector 'warehouse'" in issues_of(text)
+
+
+def test_templated_sql_is_rejected():
+    text = variant(
+        lambda d: d["steps"][0].update(sql="SELECT * FROM t WHERE id = '{{ input.order_id }}'")
+    )
+    assert any("bind parameters" in issue for issue in issues_of(text))
+
+
+def test_bad_expression_reports_path():
+    text = variant(lambda d: d["steps"][1]["rules"][0].update(expr="steps.load.output >"))
+    issues = issues_of(text)
+    assert any(issue.startswith("steps[1].rules[0].expr: invalid expression") for issue in issues)
+
+
+def test_approval_restrictions():
+    def mutate(d):
+        d["steps"].append(
+            {
+                "id": "gate",
+                "type": "approval",
+                "needs": ["check"],
+                "title": "ok?",
+                "show": ["ghost"],
+                "retry": {"max": 1},
+            }
+        )
+
+    issues = issues_of(variant(mutate))
+    assert "steps[3]: approval steps cannot declare retry or on_failure" in issues
+    assert "steps[3].show: unknown step 'ghost'" in issues
+
+
+def test_ai_schema_is_checked_and_strictified():
+    ai_step = {
+        "id": "judge",
+        "type": "ai",
+        "needs": ["check"],
+        "prompt": "Judge {{ input.order_id }}",
+        "output_schema": {"type": "object", "properties": {"ok": {"type": "boolean"}}},
+    }
+    wf = parse_workflow(variant(lambda d: d["steps"].append(ai_step)), env={})
+    judge = wf.step("judge")
+    assert isinstance(judge, AiStep)
+    assert judge.output_schema["additionalProperties"] is False
+
+    bad = dict(ai_step, output_schema={"type": "string"})
+    issues = issues_of(variant(lambda d: d["steps"].append(bad)))
+    assert "steps[3].output_schema: output_schema must have type: object at the root" in issues
+
+
+def test_output_templates_are_checked():
+    text = variant(lambda d: d["output"].update(code="{{ broken "))
+    assert any(issue.startswith("output.code: invalid template") for issue in issues_of(text))
+
+
+def test_references_to_steps_that_are_not_upstream_are_rejected():
+    def mutate(d):
+        d["steps"][0]["when"] = "steps.call.status == 'succeeded'"
+        d["steps"][1]["rules"].append({"expr": "steps['call'].output", "message": "later"})
+        d["steps"][2]["body"]["note"] = "{{ steps.ghost.output }}"
+        d["steps"].append(
+            {
+                "id": "audit",
+                "type": "task",
+                "needs": ["load"],
+                "title": "{{ steps.check.status }} {{ steps.load.status }}",
+                "payload": {"fallback": "{{ steps.manual.status }}"},
+            }
+        )
+        d["steps"].append(
+            {
+                "id": "judge",
+                "type": "ai",
+                "needs": ["load"],
+                "prompt": "Judge {{ input.order_id }}",
+                "output_schema": {"type": "object", "properties": {"ok": {"type": "string"}}},
+                "mock": [{"when": "steps.audit.status", "output": {"ok": "{{ steps.call }}"}}],
+            }
+        )
+
+    not_upstream = "is not upstream of {!r} (not in its needs, directly or transitively)"
+    assert issues_of(variant(mutate)) == [
+        f"steps[0].when: step 'call' {not_upstream.format('load')}",
+        f"steps[1].rules[1].expr: step 'call' {not_upstream.format('check')}",
+        "steps[2].body: unknown step 'ghost'",
+        f"steps[3].title: step 'check' {not_upstream.format('audit')}",
+        "steps[3].payload: fallback 'manual' does not belong to a step upstream of 'audit'",
+        f"steps[4].mock[0].when: step 'audit' {not_upstream.format('judge')}",
+        f"steps[4].mock[0].output: step 'call' {not_upstream.format('judge')}",
+    ]
+
+
+def test_approval_shows_only_upstream_steps():
+    """The approver sees each `show` step's output when the approval runs: a step that has not
+    settled by then would show nothing."""
+
+    def gate(show):
+        return {"id": "gate", "type": "approval", "needs": ["call"], "title": "ok?", "show": show}
+
+    parse_workflow(variant(lambda d: d["steps"].append(gate(["load", "call", "manual"]))), env={})
+
+    def mutate(d):
+        d["steps"].insert(1, gate(["load", "call", "manual", "gate", "ghost"]))
+        d["steps"][1]["needs"] = ["load"]
+
+    not_upstream = "is not upstream of 'gate' (not in its needs, directly or transitively)"
+    assert issues_of(variant(mutate)) == [
+        f"steps[1].show: step 'call' {not_upstream}",
+        "steps[1].show: fallback 'manual' does not belong to a step upstream of 'gate'",
+        "steps[1].show: an approval cannot show itself",
+        "steps[1].show: unknown step 'ghost'",
+    ]
+
+
+def test_references_to_upstream_steps_itself_and_from_fallbacks_are_accepted():
+    def mutate(d):
+        d["steps"][2]["body"]["one"] = "{{ steps.load.output.one }}"
+        d["steps"][2]["headers"] = {"X-Attempt": "{{ steps.call.attempts }}"}
+        d["steps"].append(
+            {
+                "id": "after",
+                "type": "task",
+                "needs": ["call"],
+                "title": "{{ steps.manual.status }} {{ steps['check'].status }}",
+                "payload": {"dynamic": "{{ steps[input.order_id] }}"},
+            }
+        )
+        d["fallbacks"][0]["payload"] = {"later": "{{ steps.after.status }}"}
+        d["output"]["after"] = "{{ steps.after.status }}"
+
+    parse_workflow(variant(mutate), env={})
+
+
+def test_validate_input_accepts_valid_data():
+    wf = parse_workflow(dump(BASE), env={})
+    data = {"order_id": "A1", "amount": 12.5, "tier": "gold"}
+    assert validate_input(wf, data) == data
+
+
+def test_validate_input_rejects_undeclared_keys():
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError) as info:
+        validate_input(wf, {"order_id": "A1", "amount": "1", "extra": True, "colour": None})
+    assert [str(i) for i in info.value.issues] == [
+        "input.amount: expected number, got str '1'",
+        "input.colour: is not declared in the workflow",
+        "input.extra: is not declared in the workflow",
+    ]
+
+
+def test_validate_input_reports_every_problem():
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError) as info:
+        validate_input(wf, {"amount": "120", "tier": "bronze"})
+    assert [str(i) for i in info.value.issues] == [
+        "input.order_id: is required",
+        "input.amount: expected number, got str '120'",
+        "input.tier: must be one of ['gold', 'silver']",
+    ]
+
+
+def test_validate_input_rejects_bool_for_number_and_non_objects():
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError, match="expected number, got bool"):
+        validate_input(wf, {"order_id": "A1", "amount": True})
+    with pytest.raises(SpecError, match="must be a JSON object"):
+        validate_input(wf, ["not", "an", "object"])
+
+
+def test_resolve_params():
+    wf = parse_workflow(dump(BASE), env={})
+    assert resolve_params(wf) == {"threshold": 100}
+    assert resolve_params(wf, {"threshold": 900}) == {"threshold": 900}
+    with pytest.raises(SpecError, match="params.unknown: is not declared"):
+        resolve_params(wf, {"unknown": 1})
+
+
+NAN, INF = float("nan"), float("inf")
+
+
+@pytest.mark.parametrize("value", [NAN, INF, -INF])
+def test_validate_input_rejects_non_finite_numbers(value):
+    """Review finding: NaN and the infinities are not JSON; a run that stored one in its input
+    made the dashboard's run endpoints answer 500."""
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError) as info:
+        validate_input(wf, {"order_id": "A1", "amount": value})
+    assert [str(i) for i in info.value.issues] == [
+        f"input.amount: must be a finite number, got {value!r}"
+    ]
+
+
+def test_validate_input_finds_non_finite_numbers_inside_objects_and_arrays():
+    def mutate(d):
+        d["input"]["meta"] = {"type": "object"}
+        d["input"]["lines"] = {"type": "array"}
+
+    wf = parse_workflow(variant(mutate), env={})
+    data = {
+        "order_id": "A1",
+        "amount": 1,
+        "meta": {"ok": [1, 2.5], "deep": {"list": [1, NAN]}},
+        "lines": [{"price": 3}, {"price": -INF}],
+    }
+    with pytest.raises(SpecError) as info:
+        validate_input(wf, data)
+    assert [str(i) for i in info.value.issues] == [
+        "input.meta.deep.list[1]: must be a finite number, got nan",
+        "input.lines[1].price: must be a finite number, got -inf",
+    ]
+
+
+@pytest.mark.parametrize("value", [NAN, INF, {"nested": [1, -INF]}])
+def test_resolve_params_rejects_non_finite_overrides(value):
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError, match=r"^params\.threshold[^:]*: must be a finite number"):
+        resolve_params(wf, {"threshold": value})
+
+
+def nested(depth):
+    """A list `depth` levels deep: nested(1) == [], nested(2) == [[]]."""
+    value = []
+    for _ in range(depth - 1):
+        value = [value]
+    return value
+
+
+def deep_input_workflow():
+    def mutate(d):
+        d["input"]["lines"] = {"type": "array"}
+
+    return parse_workflow(variant(mutate), env={})
+
+
+def test_validate_input_accepts_values_nested_up_to_the_limit():
+    wf = deep_input_workflow()
+    data = {"order_id": "A1", "amount": 1, "lines": nested(MAX_NESTING_DEPTH)}
+    assert validate_input(wf, data) == data
+    assert resolve_params(wf, {"threshold": nested(MAX_NESTING_DEPTH)})
+
+
+@pytest.mark.parametrize("depth", [MAX_NESTING_DEPTH + 1, 2000])
+def test_validate_input_rejects_values_nested_too_deeply(depth):
+    """Review finding: a run whose input nested a few hundred levels deep was stored, then every
+    dashboard listing of runs failed with a RecursionError (500); deeper still, validating it
+    ended in a RecursionError traceback."""
+    wf = deep_input_workflow()
+    with pytest.raises(SpecError) as info:
+        validate_input(wf, {"order_id": "A1", "amount": 1, "lines": nested(depth)})
+    assert [str(i) for i in info.value.issues] == [
+        f"input.lines: is nested more than {MAX_NESTING_DEPTH} levels deep"
+    ]
+    with pytest.raises(SpecError) as info:  # the wrong type: its repr is not shown either
+        validate_input(wf, {"order_id": nested(depth), "amount": 1})
+    assert [str(i) for i in info.value.issues] == [
+        f"input.order_id: is nested more than {MAX_NESTING_DEPTH} levels deep"
+    ]
+
+
+@pytest.mark.parametrize("depth", [MAX_NESTING_DEPTH + 1, 2000])
+def test_resolve_params_rejects_overrides_nested_too_deeply(depth):
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError) as info:
+        resolve_params(wf, {"threshold": nested(depth)})
+    assert [str(i) for i in info.value.issues] == [
+        f"params.threshold: is nested more than {MAX_NESTING_DEPTH} levels deep"
+    ]
+
+
+@pytest.mark.parametrize("depth", [MAX_NESTING_DEPTH, 5000, 100000])
+def test_a_workflow_nested_too_deeply_is_invalid(depth):
+    """Review finding: YAML nested a few hundred levels deep ended in a RecursionError
+    traceback; a little less deep, it loaded and the run it made broke the dashboard."""
+    text = dump(BASE) + "\nmeta: " + "[" * depth + "]" * depth + "\n"
+    with pytest.raises(SpecError) as info:
+        parse_workflow(text, env={})
+    assert [str(i) for i in info.value.issues] == [
+        f"<yaml>: is nested more than {MAX_NESTING_DEPTH} levels deep"
+    ]
+
+
+def test_a_workflow_that_contains_itself_is_invalid():
+    """A YAML alias inside its own anchor makes a value that contains itself."""
+    text = variant(lambda d: d.pop("params")) + "params: &loop {threshold: 1, again: *loop}\n"
+    assert issues_of(text) == [f"<yaml>: is nested more than {MAX_NESTING_DEPTH} levels deep"]

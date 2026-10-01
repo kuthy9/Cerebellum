@@ -1,0 +1,116 @@
+@import "tailwindcss";
+
+@theme static {
+  --color-bg: #0a0b0d;
+  --color-panel: #0e1013;
+  --color-raised: #14171b;
+  --color-line: #1e2227;
+  --color-line-strong: #2c3138;
+  --color-text: #e3e6ea;
+  --color-muted: #8b929b;
+  --color-faint: #5d646d;
+  --color-accent: #2fd0e8;
+  --color-ok: #5cb98a;
+  --color-wait: #d2a14f;
+  --color-fail: #dc6a6a;
+  --color-fallback: #a189e4;
+  --color-skip: #6b717a;
+  --font-sans: "Inter Variable", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.45;
+  -webkit-font-smoothing: antialiased;
+}
+
+::selection {
+  background: color-mix(in oklab, var(--color-accent) 28%, transparent);
+}
+
+@layer components {
+  .label {
+    font-size: 10.5px;
+    font-weight: 500;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--color-faint);
+  }
+
+  .mono {
+    font-family: var(--font-mono);
+    font-variant-numeric: tabular-nums;
+  }
+
+  .input,
+  .input-area {
+    width: 100%;
+    border: 1px solid var(--color-line);
+    background: var(--color-bg);
+    color: var(--color-text);
+    font-size: 12px;
+    outline: none;
+  }
+
+  .input {
+    height: 2rem;
+    padding: 0 0.6rem;
+  }
+
+  .input-area {
+    padding: 0.5rem 0.6rem;
+    resize: vertical;
+  }
+
+  .input:focus,
+  .input-area:focus {
+    border-color: color-mix(in oklab, var(--color-accent) 70%, transparent);
+  }
+}
+
+/* React Flow: dark canvas, hairline edges, dotted grid, no shadows. */
+.react-flow {
+  background: var(--color-bg);
+}
+
+.react-flow__background circle {
+  fill: var(--color-line-strong);
+}
+
+.react-flow__node {
+  box-shadow: none !important;
+}
+
+.react-flow__controls {
+  box-shadow: none;
+  border: 1px solid var(--color-line);
+}
+
+.react-flow__controls-button {
+  background: var(--color-panel);
+  border-bottom: 1px solid var(--color-line);
+  fill: var(--color-muted);
+}
+
+.react-flow__controls-button:hover {
+  background: var(--color-raised);
+}
+
+.react-flow__attribution {
+  background: transparent;
+}
+
+.react-flow__attribution a {
+  color: var(--color-faint);
+}

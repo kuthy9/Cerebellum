@@ -1,0 +1,300 @@
+"""PostgreSQL connector (psycopg 3) plus a SQLite sandbox used when `dsn: sandbox`."""
+
+from __future__ import annotations
+
+import asyncio
+import re
+import sqlite3
+import threading
+import time
+from collections.abc import Callable, Mapping
+from pathlib import Path
+from typing import Any, TypeVar
+
+from cerebellum.config import SANDBOX_INTERRUPT_RETRY_SECONDS
+from cerebellum.connectors.base import (
+    ConnectorEnv,
+    ConnectorError,
+    HealthStatus,
+    SqlConnector,
+    jsonable,
+    register_connector,
+)
+
+SANDBOX_DSN = "sandbox"
+T = TypeVar("T")
+# A dollar quote's opening `$tag$`: the tag is empty or a word not starting with a digit.
+_DOLLAR_TAG = re.compile(r"\$(?:[^\W\d]\w*)?\$")
+
+# One lock per sandbox file in this process: connectors of different pools (concurrent runs)
+# may open the same file, and only one of them may create and seed it.
+_FILE_LOCKS: dict[Path, threading.Lock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
+
+def sandbox_db_path(home: Path, connector_name: str) -> Path:
+    return home / f"sandbox_{connector_name}.db"
+
+
+def _file_lock(path: Path) -> threading.Lock:
+    key = path.resolve()
+    with _FILE_LOCKS_GUARD:
+        return _FILE_LOCKS.setdefault(key, threading.Lock())
+
+
+def _opaque_end(sql: str, i: int) -> int:
+    """Where the comment or quoted text that starts at `sql[i]` ends, or `i` if none starts
+    there, by PostgreSQL's rules: `--` comments run to the end of the line, `/* */` comments
+    nest, `$tag$` quotes end at the same tag, a backslash escapes the next character in
+    `E'...'` strings, and `'...'` or `"..."` end at the next quote (a doubled quote reads as
+    two adjacent quoted texts, which copies the same). Unclosed text runs to the end."""
+    n = len(sql)
+    if sql.startswith("--", i):
+        ends = [k for k in (sql.find("\n", i), sql.find("\r", i)) if k >= 0]
+        return min(ends, default=n)
+    if sql.startswith("/*", i):
+        depth, j = 1, i + 2
+        while j < n and depth:
+            if sql.startswith("/*", j):
+                depth, j = depth + 1, j + 2
+            elif sql.startswith("*/", j):
+                depth, j = depth - 1, j + 2
+            else:
+                j += 1
+        return j
+    # `$` and `E` only open text at the start of a word: `a$b$` and `name'...'` do not.
+    starts_word = i == 0 or not (sql[i - 1].isalnum() or sql[i - 1] in "_$")
+    if sql[i] == "$" and starts_word and (tag := _DOLLAR_TAG.match(sql, i)):
+        end = sql.find(tag[0], tag.end())
+        return n if end < 0 else end + len(tag[0])
+    if sql[i] in "eE" and sql.startswith("'", i + 1) and starts_word:
+        j = i + 2
+        while j < n:
+            if sql[j] == "\\" or sql.startswith("''", j):
+                j += 2
+            elif sql[j] == "'":
+                return j + 1
+            else:
+                j += 1
+        return n
+    if sql[i] in "'\"":
+        end = sql.find(sql[i], i + 1)
+        return n if end < 0 else end + 1
+    return i
+
+
+def to_pyformat(sql: str) -> str:
+    """Convert `:name` placeholders to psycopg's `%(name)s`, escape literal `%`, and leave
+    `::casts` untouched. Comments and quoted text (see `_opaque_end`) are copied as written
+    except that their `%` is escaped too: psycopg reads placeholders in the whole text."""
+    out: list[str] = []
+    i, n = 0, len(sql)
+    while i < n:
+        ch = sql[i]
+        end = _opaque_end(sql, i)
+        if end > i:
+            out.append(sql[i:end].replace("%", "%%"))
+            i = end
+        elif ch == "%":
+            out.append("%%")
+            i += 1
+        elif sql.startswith("::", i):
+            out.append("::")
+            i += 2
+        elif ch == ":" and i + 1 < n and (sql[i + 1].isalpha() or sql[i + 1] == "_"):
+            j = i + 1
+            while j < n and (sql[j].isalnum() or sql[j] == "_"):
+                j += 1
+            out.append(f"%({sql[i + 1 : j]})s")
+            i = j
+        else:
+            out.append(ch)
+            i += 1
+    return "".join(out)
+
+
+class SqliteSandboxConnector(SqlConnector):
+    """Runs the same parameterised SQL against a local SQLite file seeded on first use."""
+
+    def __init__(self, name: str, path: Path, seed: Path | None):
+        super().__init__(name)
+        self.path = path
+        self.seed = seed
+        self._conn: sqlite3.Connection | None = None
+        self._lock = asyncio.Lock()
+
+    async def open(self) -> None:
+        if self._conn is None:
+            await self._run(lambda conn: None)
+
+    def _open_sync(self) -> sqlite3.Connection:
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Held from the existence check to the end of seeding (or the removal of a file whose
+        # seeding failed), so no other connector of this file seeds it again, uses it
+        # half-seeded or loses it while in use.
+        with _file_lock(self.path):
+            fresh = not self.path.exists()
+            conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            if fresh and self.seed is not None:
+                try:
+                    conn.executescript(self.seed.read_text(encoding="utf-8"))
+                    conn.commit()
+                except (OSError, sqlite3.Error) as exc:
+                    conn.close()
+                    self.path.unlink(missing_ok=True)
+                    raise ConnectorError(
+                        f"cannot seed sandbox database from {self.seed}: {exc}",
+                        retryable=False,
+                        kind="seed",
+                    ) from exc
+        return conn
+
+    async def close(self) -> None:
+        async with self._lock:  # an abandoned operation may still be opening or using it
+            conn, self._conn = self._conn, None
+            if conn is not None:
+                await asyncio.to_thread(conn.close)
+
+    async def query(self, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+        def op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+            rows = conn.execute(sql, dict(params)).fetchall()
+            if conn.in_transaction:  # a write with RETURNING
+                conn.commit()
+            return [{key: jsonable(row[key]) for key in row.keys()} for row in rows]
+
+        return await self._run(op)
+
+    async def execute(self, sql: str, params: Mapping[str, Any]) -> int:
+        def op(conn: sqlite3.Connection) -> int:
+            before = conn.total_changes
+            cursor = conn.execute(sql, dict(params))
+            conn.commit()
+            # sqlite3 has no rowcount for a write that starts with WITH; count its changes.
+            return cursor.rowcount if cursor.rowcount >= 0 else conn.total_changes - before
+
+        return await self._run(op)
+
+    async def _run(self, op: Callable[[sqlite3.Connection], T]) -> T:
+        await self._lock.acquire()
+        # Held until the thread finishes, not until the caller stops waiting: a step timeout
+        # cancels the caller, but the thread goes on opening (seeding) or using the connection.
+        work = asyncio.ensure_future(asyncio.to_thread(self._call, op))
+        work.add_done_callback(self._release)
+        try:
+            return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            self._interrupt_until_done(work)  # so a statement that never ends frees the lock
+            raise
+        except sqlite3.OperationalError as exc:
+            transient = "locked" in str(exc) or "busy" in str(exc)
+            raise ConnectorError(f"sqlite error: {exc}", retryable=transient, kind="sql") from exc
+        except sqlite3.Error as exc:
+            raise ConnectorError(f"sqlite error: {exc}", retryable=False, kind="sql") from exc
+
+    def _call(self, op: Callable[[sqlite3.Connection], T]) -> T:
+        if self._conn is None:  # opened under the operation lock: see _run
+            self._conn = self._open_sync()
+        return op(self._conn)
+
+    def _interrupt_until_done(self, work: asyncio.Future[Any]) -> None:
+        """Interrupt the statement of an operation whose caller left, again and again until its
+        thread ends: SQLite drops an interrupt that comes before the statement starts. Seeding
+        is never interrupted: self._conn is set only once the file is seeded."""
+        if work.done():
+            return
+        if self._conn is not None:
+            self._conn.interrupt()  # safe from another thread
+        asyncio.get_running_loop().call_later(
+            SANDBOX_INTERRUPT_RETRY_SECONDS, self._interrupt_until_done, work
+        )
+
+    def _release(self, work: asyncio.Future[Any]) -> None:
+        self._lock.release()
+        if not work.cancelled():
+            work.exception()  # an abandoned operation's error has nobody left to report to
+
+    async def health(self) -> HealthStatus:
+        started = time.perf_counter()
+        try:
+            await self.query("SELECT 1 AS ok", {})
+        except ConnectorError as exc:
+            return HealthStatus(False, str(exc))
+        elapsed = (time.perf_counter() - started) * 1000
+        return HealthStatus(True, f"sqlite sandbox at {self.path}", elapsed)
+
+
+class PostgresConnector(SqlConnector):
+    def __init__(self, name: str, dsn: str):
+        super().__init__(name)
+        self.dsn = dsn
+        self._conn: Any = None
+        self._lock = asyncio.Lock()
+
+    async def open(self) -> None:
+        if self._conn is not None:
+            return
+        try:
+            import psycopg
+            from psycopg.rows import dict_row
+        except ImportError as exc:
+            raise ConnectorError(
+                "PostgreSQL support requires: pip install 'cerebellum[postgres]'",
+                retryable=False,
+                kind="dependency",
+            ) from exc
+        try:
+            self._conn = await psycopg.AsyncConnection.connect(
+                self.dsn, autocommit=True, row_factory=dict_row
+            )
+        except psycopg.OperationalError as exc:
+            raise ConnectorError(
+                f"cannot connect to postgres: {exc}", retryable=True, kind="connection"
+            ) from exc
+
+    async def close(self) -> None:
+        if self._conn is not None:
+            conn, self._conn = self._conn, None
+            await conn.close()
+
+    async def query(self, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
+        return await self._run(sql, params, fetch=True)
+
+    async def execute(self, sql: str, params: Mapping[str, Any]) -> int:
+        return await self._run(sql, params, fetch=False)
+
+    async def _run(self, sql: str, params: Mapping[str, Any], *, fetch: bool) -> Any:
+        import psycopg
+
+        await self.open()
+        async with self._lock:
+            try:
+                async with self._conn.cursor() as cursor:
+                    await cursor.execute(to_pyformat(sql), dict(params))
+                    if fetch:
+                        rows = await cursor.fetchall()
+                        return [{k: jsonable(v) for k, v in row.items()} for row in rows]
+                    return cursor.rowcount
+            except psycopg.OperationalError as exc:
+                self._conn = None  # reconnect on the next attempt
+                raise ConnectorError(
+                    f"postgres connection error: {exc}", retryable=True, kind="connection"
+                ) from exc
+            except psycopg.Error as exc:
+                raise ConnectorError(f"postgres error: {exc}", retryable=False, kind="sql") from exc
+
+    async def health(self) -> HealthStatus:
+        started = time.perf_counter()
+        try:
+            await self.query("SELECT 1 AS ok", {})
+        except ConnectorError as exc:
+            return HealthStatus(False, str(exc))
+        return HealthStatus(True, "postgres reachable", (time.perf_counter() - started) * 1000)
+
+
+@register_connector("postgres")
+def _make_postgres(name: str, spec: Any, env: ConnectorEnv) -> SqlConnector:
+    if spec.dsn == SANDBOX_DSN:
+        seed = env.base_dir / spec.seed if spec.seed else None
+        return SqliteSandboxConnector(name, sandbox_db_path(env.home, name), seed)
+    return PostgresConnector(name, spec.dsn)

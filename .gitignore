@@ -25,6 +25,12 @@ build/
 *.db-shm
 *.db-wal
 
+# Cerebellum local data directory (run history, sandbox databases)
+.cerebellum/
+
+# Frontend
+node_modules/
+
 # ── Secrets / config ──────────────────────────────────────────────────────────
 .env
 .env.*

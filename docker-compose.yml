@@ -1,0 +1,15 @@
+# Optional: a real PostgreSQL seeded with the refund example data.
+#   docker compose up -d
+#   export ORDERS_DSN=postgresql://cerebellum:cerebellum@localhost:5432/cerebellum
+#   pip install -e ".[postgres]"
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_USER: cerebellum
+      POSTGRES_PASSWORD: cerebellum
+      POSTGRES_DB: cerebellum
+    ports:
+      - "5432:5432"
+    volumes:
+      - ./src/cerebellum/templates/refund/seed.sql:/docker-entrypoint-initdb.d/seed.sql:ro
