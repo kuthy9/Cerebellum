@@ -9,8 +9,9 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from cerebellum.cli import app as cli
-from cerebellum.config import DEFAULT_UI_SHUTDOWN_GRACE_SECONDS
+from cerebellum.config import DEFAULT_UI_SHUTDOWN_GRACE_SECONDS, Settings
 from cerebellum.evals import load_suite
+from cerebellum.runtime.store import Store
 from cerebellum.sandbox.server import sandbox_running
 from cerebellum.server.app import dashboard_server
 from cerebellum.templates import template_path
@@ -117,6 +118,23 @@ def test_reject_marks_the_run_rejected(runner):
     assert rejected.exit_code == 1
     assert "rejected by bob" in rejected.text
     assert '"decision": "rejected"' in rejected.text
+
+
+def test_an_approval_rejected_by_its_timeout_is_not_blamed_on_a_human(runner, tmp_path):
+    """Review finding: on_timeout: reject was reported as "rejected by a human approver"."""
+    started = invoke(runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'large.json'}", "--sandbox")
+    assert started.exit_code == 3, started.text
+    run_id = run_id_of(started)
+    with Store(Settings.from_env().db_path) as store:  # what the engine does once it is due
+        [approval] = store.list_approvals(run_id=run_id)
+        store.decide_approval(
+            approval.id, approved=False, by="system", comment="approval timed out", expired=True
+        )
+    resumed = invoke(runner, "resume", run_id, "--sandbox")
+    assert resumed.exit_code == 1, resumed.text
+    for text in (resumed.text, invoke(runner, "status", run_id).text):
+        assert "approval timed out" in text and "manager_approval" in text
+        assert "human" not in text
 
 
 def test_outage_falls_back_to_a_manual_task(runner):

@@ -305,7 +305,19 @@ def _print_outcome(store: Store, run: RunRecord) -> None:
         console.print(Text("✕ ", style="red") + Text(run.error or "run failed"))
         console.print(Text(f"  fix the cause, then: cerebellum resume {rid}", style=render.MUTED))
     elif run.status is RunStatus.REJECTED:
-        console.print(Text("✕ rejected by a human approver", style="red"))
+        expired = {
+            event.data.get("approval_id")
+            for event in store.get_events(rid)
+            if event.type == "approval.expired"
+        }
+        rejected = store.list_approvals(run_id=rid, status="rejected")
+        if rejected and all(approval.id in expired for approval in rejected):
+            steps = ", ".join(approval.step_id for approval in rejected)
+            console.print(
+                Text(f"✕ approval timed out · {steps} rejected by on_timeout", style="red")
+            )
+        else:
+            console.print(Text("✕ rejected by a human approver", style="red"))
     elif run.status is RunStatus.NEEDS_ATTENTION:
         open_tasks = store.list_tasks(run_id=rid, status="open")
         console.print(
