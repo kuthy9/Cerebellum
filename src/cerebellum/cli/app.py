@@ -149,9 +149,9 @@ def _invalid(title: str, exc: SpecError) -> NoReturn:
     raise typer.Exit(EXIT_INVALID)
 
 
-def _load(path: Path) -> Workflow:
+def _load(path: Path, env: dict[str, str] | None = None) -> Workflow:
     try:
-        return load_workflow(path)
+        return load_workflow(path, env=env)
     except SpecError as exc:
         _invalid(f"{path} is invalid", exc)
 
@@ -584,8 +584,13 @@ def run(
     data = _parse_input(input)
     params = _parse_params(param or [])
     choice = select_provider(settings, force_mock=mock)
+    # Load before starting anything, with the environment the run will have: unless the user
+    # set SANDBOX_URL_ENV, the sandbox sets it to its own URL (connectors may read it).
+    env = dict(os.environ)
+    if sandbox and SANDBOX_URL_ENV not in env:
+        env[SANDBOX_URL_ENV] = sandbox_url(settings.sandbox_host, settings.sandbox_port)
+    wf = _load(workflow, env)
     with _sandbox(settings, sandbox_fail, enabled=sandbox):
-        wf = _load(workflow)  # after the sandbox starts: connector URLs may point at it
         with Store(settings.db_path) as store:
             engine = Engine(store, settings, choice.provider)
             try:

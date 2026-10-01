@@ -1,6 +1,8 @@
 import asyncio
 import os
 import re
+import shutil
+import socket
 from types import SimpleNamespace
 
 import pytest
@@ -67,6 +69,40 @@ def test_validate_reports_issues_with_exit_code_2(runner, tmp_path):
     result = invoke(runner, "validate", str(bad))
     assert result.exit_code == 2
     assert "steps[0].needs" in result.text and "unknown step 'ghost'" in result.text
+
+
+def test_run_reports_an_invalid_workflow_even_when_the_sandbox_port_is_busy(
+    runner, tmp_path, free_port
+):
+    """Review finding: `run --sandbox` started the sandbox before loading the workflow, so a
+    busy port hid the workflow's issues (as E6 fixed for `eval`)."""
+    bad = tmp_path / "bad.yaml"
+    bad.write_text("name: broken\nsteps:\n  - {id: a, type: task, title: x, needs: [ghost]}\n")
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", free_port))
+        blocker.listen()
+        result = invoke(runner, "run", str(bad), "--sandbox")
+    assert result.exit_code == 2, result.text
+    assert "unknown step 'ghost'" in result.text and "in use" not in result.text
+
+
+def test_run_loads_a_workflow_that_needs_the_sandbox_url(runner, tmp_path, monkeypatch, free_port):
+    """Loading before the sandbox starts still gives PAYMENTS_URL the sandbox's address."""
+    monkeypatch.delenv("PAYMENTS_URL")
+    project = tmp_path / "refund"
+    shutil.copytree(template_path("refund"), project)
+    workflow = project / "workflow.yaml"
+    source = workflow.read_text(encoding="utf-8")
+    workflow.write_text(
+        source.replace("${PAYMENTS_URL:-http://127.0.0.1:8787}", "${PAYMENTS_URL}"),
+        encoding="utf-8",
+    )
+    result = invoke(runner, "run", str(workflow), "-i", f"@{INPUTS / 'small.json'}", "--sandbox")
+    assert result.exit_code == 0, result.text
+    with Store(Settings.from_env().db_path) as store:
+        steps = store.get_steps(run_id_of(result))
+    # The refund reached this command's sandbox (the only payments API on that port).
+    assert steps["issue_refund"].status.value == "succeeded", steps["issue_refund"]
 
 
 def test_show_lists_steps_and_fallbacks(runner):
