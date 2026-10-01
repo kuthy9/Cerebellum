@@ -32,16 +32,17 @@ class WorkflowEntry:
 
 
 class Catalog:
-    """Every scan walks the tree again, but a file is only parsed again once its mtime or size
-    changes, and a snapshot (immutable per digest) only once. Scans may run in worker threads."""
+    """Every scan walks the tree again, but a file is only parsed again once its mtime, size,
+    inode or ctime changes, and a snapshot (immutable per digest) only once. Scans may run in
+    worker threads."""
 
     def __init__(self, store: Store, root: Path, *, depth: int = DEFAULT_SCAN_DEPTH) -> None:
         self.store = store
         self.root = Path(root).resolve()
         self.depth = depth
         self._lock = threading.Lock()
-        # path → ((mtime_ns, size), workflow or None when the file is not a workflow)
-        self._files: dict[Path, tuple[tuple[int, int], Workflow | None]] = {}
+        # path → ((mtime_ns, size, inode, ctime_ns), workflow or None when it is not a workflow)
+        self._files: dict[Path, tuple[tuple[int, int, int, int], Workflow | None]] = {}
         self._snapshots: dict[str, Workflow | None] = {}
 
     def entries(self) -> list[WorkflowEntry]:
@@ -52,13 +53,15 @@ class Catalog:
         snapshots = {snap.digest: snap for snap in self.store.list_workflows()}
         entries: list[WorkflowEntry] = []
         on_disk: set[str] = set()
-        files: dict[Path, tuple[tuple[int, int], Workflow | None]] = {}
+        files: dict[Path, tuple[tuple[int, int, int, int], Workflow | None]] = {}
         for path in self._yaml_files():
             try:
                 stat = path.stat()
             except OSError:
                 continue  # removed while the tree was being walked
-            stamp = (stat.st_mtime_ns, stat.st_size)
+            # mtime and size alone miss a same-size copy that keeps the old mtime (cp -p,
+            # rsync -a, tar): a replacement has a new inode, a rewrite in place a new ctime.
+            stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ino, stat.st_ctime_ns)
             cached = self._files.get(path)
             if cached is not None and cached[0] == stamp:
                 workflow = cached[1]

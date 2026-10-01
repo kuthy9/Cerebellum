@@ -1,6 +1,7 @@
 import json
 import os
 import shutil
+import time
 
 import pytest
 
@@ -105,6 +106,42 @@ def test_new_changed_and_deleted_files_are_picked_up(store, tmp_path):
 
     tiny.unlink()
     assert [e.id for e in catalog.entries()] == ["other.yaml"]
+
+
+def keep_mtime(path, before):
+    """Put `before`'s mtime back on `path`, as cp -p, rsync -a and tar do."""
+    os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
+
+
+def test_same_size_replacements_that_keep_the_mtime_are_picked_up(store, tmp_path):
+    """Review finding: the cache key was (mtime, size), so a same-size file copied over with its
+    mtime kept went on being served, and started by POST /api/runs, as the old workflow."""
+    root = tmp_path / "project"
+    tiny = write(root / "tiny.yaml", FLOW)
+    catalog = Catalog(store, root)
+    assert catalog.get("tiny.yaml").workflow.description == "A tiny flow"
+    before = tiny.stat()
+
+    # replaced by another file (rsync -a, tar): a new inode with the old mtime and size
+    staged = write(tmp_path / "staged.yaml", FLOW.replace("A tiny flow", "A tidy flow"))
+    keep_mtime(staged, before)
+    os.replace(staged, tiny)
+    assert (tiny.stat().st_mtime_ns, tiny.stat().st_size) == (before.st_mtime_ns, before.st_size)
+    assert catalog.get("tiny.yaml").workflow.description == "A tidy flow"
+
+    # rewritten in place (cp -p): the same inode, mtime and size; only the ctime moves on
+    replaced = tiny.stat()
+    deadline = time.monotonic() + 5
+    while tiny.stat().st_ctime_ns == replaced.st_ctime_ns and time.monotonic() < deadline:
+        write(tiny, FLOW.replace("A tiny flow", "A tint flow"))  # coarse ctime clocks: retry
+        keep_mtime(tiny, before)
+    now = tiny.stat()
+    assert (now.st_ino, now.st_mtime_ns, now.st_size) == (
+        replaced.st_ino,
+        before.st_mtime_ns,
+        before.st_size,
+    )
+    assert catalog.get("tiny.yaml").workflow.description == "A tint flow"
 
 
 def test_unchanged_files_are_not_parsed_again(store, tmp_path, monkeypatch):
