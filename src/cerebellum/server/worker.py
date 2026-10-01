@@ -59,6 +59,17 @@ class Worker:
             http_transports=self.http_transports,
         )
 
+    def engine_for(self, run: RunRecord) -> Engine:
+        """The engine that continues `run`. A run started with the Claude API never continues on
+        mock AI (this dashboard's provider when it has no Anthropic credentials or --mock)."""
+        if not run.mock and self.provider.mock:
+            raise CerebellumError(
+                f"run {run.run_id} was started with the Claude API but this dashboard uses mock "
+                "AI; restart `cerebellum ui` with Anthropic credentials (and without --mock) "
+                "to continue it"
+            )
+        return self.engine(mock=run.mock)
+
     def start_run(
         self,
         workflow: Workflow,
@@ -77,7 +88,7 @@ class Worker:
             raise CerebellumError(f"run {run_id} is {run.status.value} and cannot be resumed")
         if run.lease_until is not None and run.lease_until >= self.clock.now():
             raise LeaseUnavailable(f"run {run_id} is being executed by another process")
-        self._spawn(self.engine(mock=run.mock).resume(run_id))
+        self._spawn(self.engine_for(run).resume(run_id))
         return run
 
     async def decide(
@@ -87,7 +98,7 @@ class Worker:
         if approval.status != "pending":
             raise CerebellumError(f"approval {approval_id} is already {approval.status}")
         run = self.store.get_run(approval.run_id)
-        engine = self.engine(mock=run.mock)
+        engine = self.engine_for(run)  # before the decision is recorded: it would not resume
         await engine.decide(
             run.run_id, approval.step_id, approved=approved, by=by, comment=comment, resume=False
         )

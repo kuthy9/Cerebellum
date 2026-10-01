@@ -159,6 +159,23 @@ def _mode(run: RunRecord) -> str:
     return "mock AI" if run.mock else "Claude API"
 
 
+def _run_provider(settings: Settings, run: RunRecord) -> AIProvider:
+    """The provider that continues `run`: mock runs stay on mock AI, and a run started with the
+    Claude API never continues on it."""
+    provider = select_provider(settings, force_mock=run.mock).provider
+    if provider.mock and not run.mock:
+        fix = (
+            "unset CEREBELLUM_MOCK"
+            if settings.force_mock
+            else "set ANTHROPIC_API_KEY or run `ant auth login`"
+        )
+        _fail(
+            f"run {run.run_id} was started with the Claude API and cannot continue on mock AI; "
+            f"{fix}, then try again"
+        )
+    return provider
+
+
 def _exit_code(status: RunStatus) -> int:
     if status is RunStatus.WAITING_APPROVAL:
         return EXIT_WAITING
@@ -578,9 +595,13 @@ def _decide(
         with Store(settings.db_path) as store:
             run = _get_run(store, run_id)
             workflow = _run_workflow(store, run)
-            engine = Engine(
-                store, settings, select_provider(settings, force_mock=run.mock).provider
+            # Recording a decision without resuming calls no AI, so any provider will do.
+            provider = (
+                _run_provider(settings, run)
+                if resume
+                else select_provider(settings, force_mock=run.mock).provider
             )
+            engine = Engine(store, settings, provider)
             try:
                 record = _drive_live(
                     store,
@@ -660,9 +681,7 @@ def resume(
         with Store(settings.db_path) as store:
             run = _get_run(store, run_id)
             workflow = _run_workflow(store, run)
-            engine = Engine(
-                store, settings, select_provider(settings, force_mock=run.mock).provider
-            )
+            engine = Engine(store, settings, _run_provider(settings, run))
             try:
                 record = _drive_live(
                     store, workflow, _mode(run), lambda: engine.resume(run_id), run_id=run_id

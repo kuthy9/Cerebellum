@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 from types import SimpleNamespace
@@ -11,9 +12,12 @@ from typer.testing import CliRunner
 from cerebellum.cli import app as cli
 from cerebellum.config import DEFAULT_UI_SHUTDOWN_GRACE_SECONDS, Settings
 from cerebellum.evals import load_suite
+from cerebellum.runtime.engine import Engine
+from cerebellum.runtime.states import RunStatus
 from cerebellum.runtime.store import Store
 from cerebellum.sandbox.server import sandbox_running
 from cerebellum.server.app import dashboard_server
+from cerebellum.spec import load_workflow
 from cerebellum.templates import template_path
 
 WORKFLOW = str(template_path("refund") / "workflow.yaml")
@@ -135,6 +139,52 @@ def test_an_approval_rejected_by_its_timeout_is_not_blamed_on_a_human(runner, tm
     for text in (resumed.text, invoke(runner, "status", run_id).text):
         assert "approval timed out" in text and "manager_approval" in text
         assert "human" not in text
+
+
+SIGN_OFF_FLOW = """
+name: sign_off
+steps:
+  - {id: gate, type: approval, title: Sign off}
+  - {id: note, type: validate, needs: [gate], rules: [{expr: "true", message: ok}]}
+"""
+
+
+class FakeClaude:
+    """Stands in for the Claude provider; the workflow above never calls it."""
+
+    name = "claude"
+    mock = False
+
+    async def generate(self, request, messages):  # pragma: no cover - not used
+        raise AssertionError("not expected")
+
+
+def test_a_claude_run_never_continues_on_mock_ai(runner, tmp_path, monkeypatch):
+    """Review finding: approve/reject/resume silently drove a run started with the Claude API
+    on the mock provider when no credentials were available (or CEREBELLUM_MOCK was set)."""
+    flow = tmp_path / "sign_off.yaml"
+    flow.write_text(SIGN_OFF_FLOW, encoding="utf-8")
+    settings = Settings.from_env()
+    with Store(settings.db_path) as store:
+        run = asyncio.run(Engine(store, settings, FakeClaude()).start(load_workflow(flow)))
+    assert run.status is RunStatus.WAITING_APPROVAL and run.mock is False
+
+    for command in ("approve", "reject", "resume"):  # CEREBELLUM_MOCK=1 in this fixture
+        refused = invoke(runner, command, run.run_id)
+        assert refused.exit_code == 1, refused.text
+        assert "started with the Claude API" in refused.text
+        assert "CEREBELLUM_MOCK" in refused.text
+
+    monkeypatch.delenv("CEREBELLUM_MOCK")
+    monkeypatch.setattr("cerebellum.ai.has_anthropic_credentials", lambda *args, **kw: False)
+    refused = invoke(runner, "approve", run.run_id, "--by", "alice")
+    assert refused.exit_code == 1, refused.text
+    assert "started with the Claude API" in refused.text and "ANTHROPIC_API_KEY" in refused.text
+    assert "pending" in invoke(runner, "approvals").text
+
+    recorded = invoke(runner, "approve", run.run_id, "--by", "alice", "--no-resume")
+    assert recorded.exit_code == 3, recorded.text  # recording a decision needs no AI
+    assert "approved by alice" in recorded.text
 
 
 def test_outage_falls_back_to_a_manual_task(runner):
