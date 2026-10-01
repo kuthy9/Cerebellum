@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import os
 import threading
 from datetime import date, datetime
@@ -286,6 +287,76 @@ async def test_sandbox_operation_waits_for_an_abandoned_seeding(tmp_path, seed_f
     assert not following.done()
     seed.release.set()
     assert await following == [{"n": 2}]
+    assert seed.reads == 1
+    await connector.close()
+
+
+ENDLESS = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c"
+
+
+async def test_sandbox_statement_of_a_timed_out_caller_is_interrupted(tmp_path, seed_file, caplog):
+    """Review finding: a statement that never finishes held the operation lock after its step
+    timed out, blocking every later operation and close() forever."""
+    connector = SqliteSandboxConnector("db", tmp_path / "s.db", seed_file)
+    await connector.open()
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(connector.query(ENDLESS, {}), 0.2)
+        assert await asyncio.wait_for(connector.query(COUNT_ORDERS, {}), 5) == [{"n": 2}]
+        updated = await asyncio.wait_for(
+            connector.execute("UPDATE orders SET status = 'x' WHERE id = :id", {"id": "A1"}), 5
+        )
+        assert updated == 1
+        await asyncio.wait_for(connector.close(), 5)
+    finally:
+        if connector._conn is not None:  # a regression fails this test, not hangs the suite
+            connector._conn.interrupt()
+    gc.collect()
+    assert "interrupted" not in caplog.text  # the abandoned statement's error is not reported
+
+
+async def test_sandbox_statement_starting_after_its_caller_left_is_interrupted(tmp_path, seed_file):
+    """SQLite drops an interrupt that comes before the statement starts, so it is repeated."""
+    connector = SqliteSandboxConnector("db", tmp_path / "s.db", seed_file)
+    await connector.open()
+    started, go = threading.Event(), threading.Event()
+
+    def late(conn):
+        started.set()
+        go.wait(5)
+        return conn.execute(ENDLESS).fetchall()
+
+    caller = asyncio.create_task(connector._run(late))
+    await asyncio.to_thread(started.wait, 5)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    await asyncio.sleep(0.1)  # the first interrupts find no statement running
+    go.set()
+    try:
+        assert await asyncio.wait_for(connector.query(COUNT_ORDERS, {}), 5) == [{"n": 2}]
+    finally:
+        if connector._conn is not None:  # a regression fails this test, not hangs the suite
+            connector._conn.interrupt()
+    await connector.close()
+
+
+async def test_sandbox_seeding_of_a_timed_out_caller_is_not_interrupted(tmp_path):
+    """Seeding goes on after its caller timed out, even while the caller's statement would be
+    interrupted, and the next operation sees all of the seeded data."""
+    path = tmp_path / "seed.sql"
+    path.write_text(
+        SEED + "CREATE TABLE slow AS WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL "
+        "SELECT x + 1 FROM c WHERE x < 3000000) SELECT count(*) AS n FROM c;"
+    )
+    seed = SlowSeed(path)
+    connector = SqliteSandboxConnector("db", tmp_path / "s.db", seed)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(connector.query(COUNT_ORDERS, {}), 0.1)
+    seed.release.set()  # the seed's statements run after their caller left
+    rows = await asyncio.wait_for(connector.query("SELECT n FROM slow", {}), 10)
+    assert rows == [{"n": 3000000}]
+    assert await connector.query(COUNT_ORDERS, {}) == [{"n": 2}]
     assert seed.reads == 1
     await connector.close()
 

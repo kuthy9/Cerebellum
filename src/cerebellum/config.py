@@ -34,6 +34,10 @@ EVAL_LOCK_FILE = "eval.lock"
 DEFAULT_EVAL_KEEP = 10
 # `cerebellum new`: model attempts per draft — the first reply plus repairs from loader issues.
 DEFAULT_NEW_ATTEMPTS = 3
+# SQLite sandbox: after a caller stops waiting (a step timeout), its statement is interrupted
+# and the interrupt repeated at this interval until the statement's thread ends; SQLite drops an
+# interrupt that arrives before the statement starts.
+SANDBOX_INTERRUPT_RETRY_SECONDS = 0.05
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _CREDENTIAL_ENV_VARS = (

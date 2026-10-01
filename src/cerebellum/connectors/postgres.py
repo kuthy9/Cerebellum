@@ -11,6 +11,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any, TypeVar
 
+from cerebellum.config import SANDBOX_INTERRUPT_RETRY_SECONDS
 from cerebellum.connectors.base import (
     ConnectorEnv,
     ConnectorError,
@@ -182,6 +183,9 @@ class SqliteSandboxConnector(SqlConnector):
         work.add_done_callback(self._release)
         try:
             return await asyncio.shield(work)
+        except asyncio.CancelledError:
+            self._interrupt_until_done(work)  # so a statement that never ends frees the lock
+            raise
         except sqlite3.OperationalError as exc:
             transient = "locked" in str(exc) or "busy" in str(exc)
             raise ConnectorError(f"sqlite error: {exc}", retryable=transient, kind="sql") from exc
@@ -192,6 +196,18 @@ class SqliteSandboxConnector(SqlConnector):
         if self._conn is None:  # opened under the operation lock: see _run
             self._conn = self._open_sync()
         return op(self._conn)
+
+    def _interrupt_until_done(self, work: asyncio.Future[Any]) -> None:
+        """Interrupt the statement of an operation whose caller left, again and again until its
+        thread ends: SQLite drops an interrupt that comes before the statement starts. Seeding
+        is never interrupted: self._conn is set only once the file is seeded."""
+        if work.done():
+            return
+        if self._conn is not None:
+            self._conn.interrupt()  # safe from another thread
+        asyncio.get_running_loop().call_later(
+            SANDBOX_INTERRUPT_RETRY_SECONDS, self._interrupt_until_done, work
+        )
 
     def _release(self, work: asyncio.Future[Any]) -> None:
         self._lock.release()
