@@ -5,6 +5,7 @@ import pytest
 from cerebellum.ai.base import AIResult, Usage
 from cerebellum.authoring import (
     DRAFT_SCHEMA,
+    STEP_GUIDE,
     DraftError,
     build_prompt,
     draft_workflow,
@@ -94,6 +95,16 @@ def test_prompt_carries_schema_step_guide_and_example():
     assert {"name", "steps", "connectors", "fallbacks"} <= set(schema["properties"])
     assert not {"source_yaml", "base_dir", "digest"} & set(schema["properties"])
     assert json.dumps(schema, separators=(",", ":")) in prompt
+
+
+def test_step_guide_says_which_steps_a_step_may_name():
+    """Review finding: the guide did not say that an approval's show list, like templates and
+    conditions, may only name upstream steps and their fallbacks, which the loader enforces."""
+    guide = " ".join(STEP_GUIDE.split())
+    assert "show [upstream step ids" in guide
+    assert "An approval's show list follows the same rule" in guide
+    assert "of the fallbacks those upstream steps own" in guide
+    assert "Fallback steps and `output` may read any step" in guide
 
 
 @pytest.mark.live

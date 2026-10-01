@@ -40,14 +40,18 @@ Every step: id, type, needs, when, timeout, retry {max, backoff, base, max_delay
 - ai: prompt, system, output_schema (a JSON Schema object), effort low|medium|high,
   mock [{when, output}] so it also runs offline
 - validate: rules [{expr, message}]; any false rule fails the run
-- approval: title, show [step ids], timeout, on_timeout approve|reject; pauses the run for a human
+- approval: title, show [upstream step ids, see Rules], timeout, on_timeout approve|reject;
+  pauses the run for a human
 - task: title, assignee, payload; opens a manual task (the usual fallback)
 Rules:
 - Conditions (when, rules.expr) and templates ("{{ ... }}") are Jinja over input, params,
   steps.<id>.output/status/error/attempts and run; fallbacks also see failure.step and
   failure.error. An optional input may be absent: write `input.x | default('')`, not `input.x`.
-- A step may only read steps.<id> of itself and of steps it needs, directly or transitively;
-  fallbacks and `output` may read any step.
+- A step's templates and conditions may only read steps.<id> of itself, of the steps it needs
+  (directly or transitively: its upstream steps) and of the fallbacks those upstream steps own
+  (their on_failure). An approval's show list follows the same rule but cannot name the
+  approval itself. To read another step, add it (for a fallback: the step that owns it) to
+  needs. Fallback steps and `output` may read any step.
 - Durations are strings such as 500ms, 30s, 5m, 24h.
 - Connectors are declared once under `connectors`: postgres {dsn, seed} or rest
   {base_url, headers, timeout}. Only connector values may use ${VAR:-default}; always give a

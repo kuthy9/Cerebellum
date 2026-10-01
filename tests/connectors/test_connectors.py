@@ -1,4 +1,5 @@
 import asyncio
+import gc
 import os
 import threading
 from datetime import date, datetime
@@ -54,6 +55,87 @@ def seed_file(tmp_path):
     ],
 )
 def test_to_pyformat(sql, expected):
+    assert to_pyformat(sql) == expected
+
+
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        # An apostrophe in a comment opened a fake quote that hid every later bind.
+        pytest.param(
+            "SELECT 1 -- don't\nFROM t WHERE a = :a",
+            "SELECT 1 -- don't\nFROM t WHERE a = %(a)s",
+            id="apostrophe-in-line-comment",
+        ),
+        pytest.param(
+            "SELECT /* it's */ a FROM t WHERE a = :a",
+            "SELECT /* it's */ a FROM t WHERE a = %(a)s",
+            id="apostrophe-in-block-comment",
+        ),
+        # A :name in a comment became a parameter nobody supplied; % is still doubled there,
+        # because psycopg looks for % placeholders in the whole text.
+        pytest.param(
+            "SELECT :a -- 5% off for :b\n",
+            "SELECT %(a)s -- 5%% off for :b\n",
+            id="bind-and-percent-in-line-comment",
+        ),
+        pytest.param(
+            "SELECT /* :b 100% */ :a",
+            "SELECT /* :b 100%% */ %(a)s",
+            id="bind-and-percent-in-block-comment",
+        ),
+        pytest.param(
+            "SELECT /* outer /* inner */ still :b, it's */ :a",
+            "SELECT /* outer /* inner */ still :b, it's */ %(a)s",
+            id="nested-block-comment",
+        ),
+        pytest.param(
+            "SELECT 1 -- note\rWHERE a = :a",
+            "SELECT 1 -- note\rWHERE a = %(a)s",
+            id="line-comment-ends-at-carriage-return",
+        ),
+        pytest.param("SELECT :a /* open :b", "SELECT %(a)s /* open :b", id="unclosed-comment"),
+        # Dollar quotes.
+        pytest.param(
+            "SELECT $$it's :x$$ AS s WHERE a = :a",
+            "SELECT $$it's :x$$ AS s WHERE a = %(a)s",
+            id="dollar-quote",
+        ),
+        pytest.param(
+            "SELECT $fn$ it's 5% :x $$ $fn$ AS body, :a",
+            "SELECT $fn$ it's 5%% :x $$ $fn$ AS body, %(a)s",
+            id="tagged-dollar-quote",
+        ),
+        pytest.param("SELECT $1, :a", "SELECT $1, %(a)s", id="positional-parameter"),
+        pytest.param(
+            "SELECT a$b$c, :a FROM t", "SELECT a$b$c, %(a)s FROM t", id="dollar-in-identifier"
+        ),
+        # E'...' strings, where a backslash escapes the next character.
+        pytest.param(
+            "SELECT E'it\\'s :x' AS s WHERE a = :a",
+            "SELECT E'it\\'s :x' AS s WHERE a = %(a)s",
+            id="escape-string",
+        ),
+        pytest.param(
+            "SELECT e'a\\'b 5%' AS s, :a",
+            "SELECT e'a\\'b 5%%' AS s, %(a)s",
+            id="lowercase-escape-string",
+        ),
+        # Elsewhere a backslash is just a character, and an E ending a word starts no E-string.
+        pytest.param(
+            "SELECT name'C:\\' AS p, :a",
+            "SELECT name'C:\\' AS p, %(a)s",
+            id="typed-literal-ending-in-e",
+        ),
+        pytest.param(
+            'SELECT "a:b%" FROM t WHERE c = :c',
+            'SELECT "a:b%%" FROM t WHERE c = %(c)s',
+            id="quoted-identifier",
+        ),
+        pytest.param("SELECT 5 - :a / :b", "SELECT 5 - %(a)s / %(b)s", id="minus-and-slash"),
+    ],
+)
+def test_to_pyformat_postgres_comments_and_strings(sql, expected):
     assert to_pyformat(sql) == expected
 
 
@@ -205,6 +287,76 @@ async def test_sandbox_operation_waits_for_an_abandoned_seeding(tmp_path, seed_f
     assert not following.done()
     seed.release.set()
     assert await following == [{"n": 2}]
+    assert seed.reads == 1
+    await connector.close()
+
+
+ENDLESS = "WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL SELECT x + 1 FROM c) SELECT count(*) FROM c"
+
+
+async def test_sandbox_statement_of_a_timed_out_caller_is_interrupted(tmp_path, seed_file, caplog):
+    """Review finding: a statement that never finishes held the operation lock after its step
+    timed out, blocking every later operation and close() forever."""
+    connector = SqliteSandboxConnector("db", tmp_path / "s.db", seed_file)
+    await connector.open()
+    try:
+        with pytest.raises(TimeoutError):
+            await asyncio.wait_for(connector.query(ENDLESS, {}), 0.2)
+        assert await asyncio.wait_for(connector.query(COUNT_ORDERS, {}), 5) == [{"n": 2}]
+        updated = await asyncio.wait_for(
+            connector.execute("UPDATE orders SET status = 'x' WHERE id = :id", {"id": "A1"}), 5
+        )
+        assert updated == 1
+        await asyncio.wait_for(connector.close(), 5)
+    finally:
+        if connector._conn is not None:  # a regression fails this test, not hangs the suite
+            connector._conn.interrupt()
+    gc.collect()
+    assert "interrupted" not in caplog.text  # the abandoned statement's error is not reported
+
+
+async def test_sandbox_statement_starting_after_its_caller_left_is_interrupted(tmp_path, seed_file):
+    """SQLite drops an interrupt that comes before the statement starts, so it is repeated."""
+    connector = SqliteSandboxConnector("db", tmp_path / "s.db", seed_file)
+    await connector.open()
+    started, go = threading.Event(), threading.Event()
+
+    def late(conn):
+        started.set()
+        go.wait(5)
+        return conn.execute(ENDLESS).fetchall()
+
+    caller = asyncio.create_task(connector._run(late))
+    await asyncio.to_thread(started.wait, 5)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    await asyncio.sleep(0.1)  # the first interrupts find no statement running
+    go.set()
+    try:
+        assert await asyncio.wait_for(connector.query(COUNT_ORDERS, {}), 5) == [{"n": 2}]
+    finally:
+        if connector._conn is not None:  # a regression fails this test, not hangs the suite
+            connector._conn.interrupt()
+    await connector.close()
+
+
+async def test_sandbox_seeding_of_a_timed_out_caller_is_not_interrupted(tmp_path):
+    """Seeding goes on after its caller timed out, even while the caller's statement would be
+    interrupted, and the next operation sees all of the seeded data."""
+    path = tmp_path / "seed.sql"
+    path.write_text(
+        SEED + "CREATE TABLE slow AS WITH RECURSIVE c(x) AS (SELECT 1 UNION ALL "
+        "SELECT x + 1 FROM c WHERE x < 3000000) SELECT count(*) AS n FROM c;"
+    )
+    seed = SlowSeed(path)
+    connector = SqliteSandboxConnector("db", tmp_path / "s.db", seed)
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(connector.query(COUNT_ORDERS, {}), 0.1)
+    seed.release.set()  # the seed's statements run after their caller left
+    rows = await asyncio.wait_for(connector.query("SELECT n FROM slow", {}), 10)
+    assert rows == [{"n": 3000000}]
+    assert await connector.query(COUNT_ORDERS, {}) == [{"n": 2}]
     assert seed.reads == 1
     await connector.close()
 

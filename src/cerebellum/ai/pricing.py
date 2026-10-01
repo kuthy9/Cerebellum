@@ -81,7 +81,10 @@ def _price(value: Any) -> float:
     """A JSON number that is finite and not negative; booleans and strings are not prices."""
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"a price must be a JSON number, not {value!r}")
-    price = float(value)
+    try:
+        price = float(value)
+    except OverflowError:  # a JSON integer too large for a float
+        raise ValueError("a price must be finite, not an integer too large for a float") from None
     if not math.isfinite(price) or price < 0:
         raise ValueError(f"a price must be finite and not negative, not {value!r}")
     return price
