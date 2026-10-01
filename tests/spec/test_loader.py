@@ -249,6 +249,62 @@ def test_output_templates_are_checked():
     assert any(issue.startswith("output.code: invalid template") for issue in issues_of(text))
 
 
+def test_references_to_steps_that_are_not_upstream_are_rejected():
+    def mutate(d):
+        d["steps"][0]["when"] = "steps.call.status == 'succeeded'"
+        d["steps"][1]["rules"].append({"expr": "steps['call'].output", "message": "later"})
+        d["steps"][2]["body"]["note"] = "{{ steps.ghost.output }}"
+        d["steps"].append(
+            {
+                "id": "audit",
+                "type": "task",
+                "needs": ["load"],
+                "title": "{{ steps.check.status }} {{ steps.load.status }}",
+                "payload": {"fallback": "{{ steps.manual.status }}"},
+            }
+        )
+        d["steps"].append(
+            {
+                "id": "judge",
+                "type": "ai",
+                "needs": ["load"],
+                "prompt": "Judge {{ input.order_id }}",
+                "output_schema": {"type": "object", "properties": {"ok": {"type": "string"}}},
+                "mock": [{"when": "steps.audit.status", "output": {"ok": "{{ steps.call }}"}}],
+            }
+        )
+
+    not_upstream = "is not upstream of {!r} (not in its needs, directly or transitively)"
+    assert issues_of(variant(mutate)) == [
+        f"steps[0].when: step 'call' {not_upstream.format('load')}",
+        f"steps[1].rules[1].expr: step 'call' {not_upstream.format('check')}",
+        "steps[2].body: unknown step 'ghost'",
+        f"steps[3].title: step 'check' {not_upstream.format('audit')}",
+        "steps[3].payload: fallback 'manual' does not belong to a step upstream of 'audit'",
+        f"steps[4].mock[0].when: step 'audit' {not_upstream.format('judge')}",
+        f"steps[4].mock[0].output: step 'call' {not_upstream.format('judge')}",
+    ]
+
+
+def test_references_to_upstream_steps_itself_and_from_fallbacks_are_accepted():
+    def mutate(d):
+        d["steps"][2]["body"]["one"] = "{{ steps.load.output.one }}"
+        d["steps"][2]["headers"] = {"X-Attempt": "{{ steps.call.attempts }}"}
+        d["steps"].append(
+            {
+                "id": "after",
+                "type": "task",
+                "needs": ["call"],
+                "title": "{{ steps.manual.status }} {{ steps['check'].status }}",
+                "payload": {"dynamic": "{{ steps[input.order_id] }}"},
+            }
+        )
+        d["fallbacks"][0]["payload"] = {"later": "{{ steps.after.status }}"}
+        d["output"]["after"] = "{{ steps.after.status }}"
+
+    parse_workflow(variant(mutate), env={})
+
+
 def test_validate_input_accepts_valid_data():
     wf = parse_workflow(dump(BASE), env={})
     data = {"order_id": "A1", "amount": 12.5, "tier": "gold"}

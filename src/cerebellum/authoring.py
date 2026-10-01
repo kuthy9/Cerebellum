@@ -46,6 +46,8 @@ Rules:
 - Conditions (when, rules.expr) and templates ("{{ ... }}") are Jinja over input, params,
   steps.<id>.output/status/error/attempts and run; fallbacks also see failure.step and
   failure.error. An optional input may be absent: write `input.x | default('')`, not `input.x`.
+- A step may only read steps.<id> of itself and of steps it needs, directly or transitively;
+  fallbacks and `output` may read any step.
 - Durations are strings such as 500ms, 30s, 5m, 24h.
 - Connectors are declared once under `connectors`: postgres {dsn, seed} or rest
   {base_url, headers, timeout}. Only connector values may use ${VAR:-default}; always give a

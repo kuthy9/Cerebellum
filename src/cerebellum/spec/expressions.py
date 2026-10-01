@@ -20,8 +20,10 @@ from jinja2 import (
     TemplateSyntaxError,
     Undefined,
     UndefinedError,
+    nodes,
 )
 from jinja2.exceptions import SecurityError
+from jinja2.parser import Parser
 from jinja2.sandbox import SandboxedEnvironment
 
 from cerebellum.errors import TemplateError
@@ -82,6 +84,35 @@ def check_template(value: Any) -> None:
     elif isinstance(value, list):
         for item in value:
             check_template(item)
+
+
+def expression_step_refs(expr: str) -> set[str]:
+    """Step ids a valid expression reads as `steps.<id>` or `steps['<id>']`."""
+    return _step_refs(Parser(_LENIENT, expr, state="variable").parse_expression())
+
+
+def template_step_refs(value: Any) -> set[str]:
+    """Step ids read by the valid template strings inside `value`. A computed lookup such as
+    `steps[name]` cannot be known before the run and is left out."""
+    if isinstance(value, str):
+        return _step_refs(_LENIENT.parse(value)) if is_template(value) else set()
+    if isinstance(value, Mapping):
+        return set().union(*(template_step_refs(item) for item in value.values()))
+    if isinstance(value, list):
+        return set().union(*(template_step_refs(item) for item in value))
+    return set()
+
+
+def _step_refs(tree: nodes.Node) -> set[str]:
+    refs: set[str] = set()
+    for node in tree.find_all((nodes.Getattr, nodes.Getitem)):
+        if not (isinstance(node.node, nodes.Name) and node.node.name == "steps"):
+            continue
+        if isinstance(node, nodes.Getattr):
+            refs.add(node.attr)
+        elif isinstance(node.arg, nodes.Const) and isinstance(node.arg.value, str):
+            refs.add(node.arg.value)
+    return refs
 
 
 def eval_condition(expr: str, ctx: Mapping[str, Any]) -> bool:
