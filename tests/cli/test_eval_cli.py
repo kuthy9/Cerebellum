@@ -5,6 +5,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from cerebellum.cli import app as cli
+from cerebellum.cli import render
 from cerebellum.templates import template_path
 
 WORKFLOW = template_path("refund") / "workflow.yaml"
@@ -54,14 +55,41 @@ def test_eval_runs_a_suite_and_compares_with_the_previous_run(runner, tmp_path):
     suite = write_suite(tmp_path)
     first = invoke(runner, "eval", suite)
     assert first.exit_code == 0, first.text
-    assert "3/3 passed" in first.text and "first run of this suite" in first.text
+    assert "3/3 passed" in first.text and "first run of this suite with mock AI" in first.text
     assert "mock AI" in first.text
     assert "fresh sandbox database" in first.text and "(sandbox)" in first.text
     assert "is not the sandbox" not in first.text
     second = invoke(runner, "eval", suite)
     assert second.exit_code == 0, second.text
     first_id = EVAL_ID.search(first.text).group(0)
-    assert f"vs {first_id}: 3/3 → 3/3" in second.text and "no regressions" in second.text
+    assert f"vs {first_id} (mock AI): 3/3 → 3/3" in second.text and "no regressions" in second.text
+
+
+def text_of(renderable):
+    console = Console(width=200, highlight=False, record=True)
+    console.print(renderable)
+    return console.export_text()
+
+
+def test_eval_summary_names_the_ai_mode_it_compares(store):
+    """Review finding: the summary did not say which AI mode the baseline eval used."""
+    for eval_id in ("ev_00000001", "ev_00000002"):
+        store.create_eval_run(
+            eval_id,
+            suite="s",
+            suite_path="/x/evals.yaml",
+            workflow_name="wf",
+            workflow_digest="d1",
+            mock=False,
+            total=1,
+            baseline_id=None,
+        )
+    baseline = store.finish_eval_run("ev_00000001", status="completed")
+    record = store.finish_eval_run("ev_00000002", status="completed")
+    compared = text_of(render.eval_summary(record, baseline, [], 0.9))
+    assert "vs ev_00000001 (Claude API): 0/1 → 0/1" in compared
+    first = text_of(render.eval_summary(record, None, [], 0.9))
+    assert "first run of this suite with the Claude API" in first
 
 
 def test_eval_exit_code_follows_min_pass(runner, tmp_path):

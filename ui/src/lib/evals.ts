@@ -59,6 +59,11 @@ export function describeCheck(check: EvalCheck): string {
   return `${check.target}: expected ${show(check.expected)} · got ${show(check.actual)}`;
 }
 
+/** The AI an eval ran with. An eval is compared only with a baseline of the same mode. */
+export function aiMode(run: Pick<EvalRun, "mock">): "mock" | "claude" {
+  return run.mock ? "mock" : "claude";
+}
+
 export type CaseChange = "regression" | "fixed" | "new" | null;
 
 /** How a case moved against the baseline eval run (null without a baseline or without change). */

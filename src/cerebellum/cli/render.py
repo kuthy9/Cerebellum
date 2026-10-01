@@ -396,6 +396,10 @@ def eval_case_line(result: EvalResultRecord) -> Group:
     return Group(*lines)
 
 
+def ai_mode(mock: bool) -> str:
+    return "mock AI" if mock else "Claude API"
+
+
 def eval_summary(
     record: EvalRunRecord,
     baseline: EvalRunRecord | None,
@@ -417,11 +421,14 @@ def eval_summary(
         )
     lines = [head]
     if baseline is None:
-        lines.append(Text("   first run of this suite: nothing to compare with", style=MUTED))
+        mode = "mock AI" if record.mock else "the Claude API"
+        lines.append(
+            Text(f"   first run of this suite with {mode}: nothing to compare with", style=MUTED)
+        )
     else:
         compare = Text(
-            f"   vs {baseline.id}: {baseline.passed}/{baseline.total} → "
-            f"{record.passed}/{record.total}",
+            f"   vs {baseline.id} ({ai_mode(baseline.mock)}): {baseline.passed}/{baseline.total}"
+            f" → {record.passed}/{record.total}",
             style=MUTED,
         )
         if regressed:

@@ -75,6 +75,28 @@ async def test_suite_is_repeatable_and_isolated(make_runner, store, settings):
     assert not (settings.home / "sandbox_orders_db.db").exists()
 
 
+async def test_baseline_is_the_previous_run_with_the_same_ai_mode(make_runner, store, clock):
+    """Review finding: a mock eval was compared with a newer Claude eval of the suite."""
+    loaded = load_suite(SUITE, env={})
+    mock_run = await make_runner().run(loaded)
+    clock.advance(1)
+    store.create_eval_run(
+        "ev_0000c1a0",
+        suite=loaded.suite.suite,
+        suite_path=str(loaded.path),
+        workflow_name=loaded.workflow.name,
+        workflow_digest=loaded.workflow.digest,
+        mock=False,
+        total=len(loaded.suite.cases),
+        baseline_id=None,
+    )
+    store.finish_eval_run("ev_0000c1a0", status="completed")
+    clock.advance(1)
+    again = await make_runner().run(loaded)
+    assert again.baseline_id == mock_run.id
+    assert again.regressions == 0
+
+
 async def test_breaking_the_threshold_is_flagged_as_regression(make_runner, store, tmp_path):
     project = tmp_path / "refund"
     shutil.copytree(template_path("refund"), project)
@@ -160,7 +182,7 @@ async def test_interrupted_eval_is_marked_errored(make_runner, store):
     [record] = store.list_eval_runs()
     assert record.status == "errored" and record.error == "operator pressed Ctrl-C"
     assert record.passed == 1 and record.ended_at is not None
-    assert store.latest_eval_run("refund_regression") is None
+    assert store.latest_eval_run("refund_regression", mock=True) is None
     assert calls[-1] == "never"  # the sandbox is put back to normal
 
 

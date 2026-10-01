@@ -14,14 +14,14 @@ CHECK = {
 }
 
 
-def make_eval(store, eval_run_id="ev_00000001", *, suite="s", baseline_id=None, total=2):
+def make_eval(store, eval_run_id="ev_00000001", *, suite="s", baseline_id=None, total=2, mock=True):
     return store.create_eval_run(
         eval_run_id,
         suite=suite,
         suite_path="/x/evals.yaml",
         workflow_name="wf",
         workflow_digest="d1",
-        mock=True,
+        mock=mock,
         total=total,
         baseline_id=baseline_id,
     )
@@ -68,7 +68,7 @@ def test_eval_run_lifecycle(store):
 
 
 def test_latest_completed_eval_run_is_the_baseline(store, clock):
-    assert store.latest_eval_run("s") is None
+    assert store.latest_eval_run("s", mock=True) is None
     make_eval(store, "ev_00000001")
     store.finish_eval_run("ev_00000001", status="completed")
     clock.advance(1)
@@ -76,10 +76,22 @@ def test_latest_completed_eval_run_is_the_baseline(store, clock):
     store.finish_eval_run("ev_00000002", status="errored", error="interrupted")
     clock.advance(1)
     make_eval(store, "ev_00000003", suite="other")
-    assert store.latest_eval_run("s").id == "ev_00000001"
+    assert store.latest_eval_run("s", mock=True).id == "ev_00000001"
     assert [r.id for r in store.list_eval_runs()] == ["ev_00000003", "ev_00000002", "ev_00000001"]
     assert [r.id for r in store.list_eval_runs(suite="s")] == ["ev_00000002", "ev_00000001"]
     assert store.get_eval_run("ev_00000002").error == "interrupted"
+
+
+def test_baseline_is_the_latest_completed_run_with_the_same_ai_mode(store, clock):
+    """Review finding: a Claude eval was compared with the latest mock eval (and vice versa)."""
+    make_eval(store, "ev_00000001", mock=True)
+    store.finish_eval_run("ev_00000001", status="completed")
+    clock.advance(1)
+    make_eval(store, "ev_00000002", mock=False)
+    store.finish_eval_run("ev_00000002", status="completed")
+    assert store.latest_eval_run("s", mock=True).id == "ev_00000001"
+    assert store.latest_eval_run("s", mock=False).id == "ev_00000002"
+    assert store.latest_eval_run("other", mock=False) is None
 
 
 def test_unknown_eval_run_is_not_found(store):

@@ -4,7 +4,7 @@ import { ApiError, api } from "../api";
 import { Sparkline } from "../components/Sparkline";
 import { Empty, ErrorNote, Meta, PageHeader, Panel } from "../components/ui";
 import { useNow } from "../hooks/useNow";
-import { type CaseChange, caseChange, describeCheck } from "../lib/evals";
+import { type CaseChange, aiMode, caseChange, describeCheck } from "../lib/evals";
 import { fmtCost, fmtDuration, fmtPercent } from "../lib/format";
 import { type Tone, toneColor } from "../lib/status";
 import type { EvalResult } from "../types";
@@ -93,7 +93,7 @@ export function EvalDetail() {
               <Link to={`/evals/${baseline.id}`} className="text-accent hover:underline">
                 {baseline.id}
               </Link>{" "}
-              {baseline.passed}/{baseline.total}
+              {baseline.passed}/{baseline.total} · {aiMode(baseline)}
             </>
           ) : (
             "first run"
@@ -106,7 +106,7 @@ export function EvalDetail() {
         <Meta label="duration">{fmtDuration(run.duration_s ?? now - run.created_at)}</Meta>
         <Meta label="ai first try">{run.ai_first_try ? `${run.ai_first_ok}/${run.ai_first_try}` : "—"}</Meta>
         <Meta label="repairs">{run.ai_repairs}</Meta>
-        <Meta label="ai">{run.mock ? "mock" : "claude"}</Meta>
+        <Meta label="ai">{aiMode(run)}</Meta>
       </div>
       {run.error && <div className="mono border-b border-line px-6 py-2 text-[12px] text-fail">{run.error}</div>}
       <div className="grid gap-6 p-6 xl:grid-cols-[minmax(0,3fr)_minmax(260px,1fr)]">

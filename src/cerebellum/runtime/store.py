@@ -1118,12 +1118,13 @@ class Store:
         )
         return [_eval_run(row) for row in rows]
 
-    def latest_eval_run(self, suite: str) -> EvalRunRecord | None:
-        """The most recent completed run of `suite`: the baseline the next run is compared with."""
+    def latest_eval_run(self, suite: str, *, mock: bool) -> EvalRunRecord | None:
+        """The most recent completed run of `suite` with the same AI mode (mock or Claude): the
+        baseline the next run is compared with. Mock and Claude results are not comparable."""
         rows = self._rows(
-            "SELECT * FROM eval_runs WHERE suite=? AND status='completed' "
+            "SELECT * FROM eval_runs WHERE suite=? AND mock=? AND status='completed' "
             "ORDER BY created_at DESC, rowid DESC LIMIT 1",
-            (suite,),
+            (suite, int(mock)),
         )
         return _eval_run(rows[0]) if rows else None
 

@@ -1,5 +1,5 @@
 """Run an eval suite: one real run per case, decided and checked automatically, then compared
-with the previous completed run of the same suite."""
+with the previous completed run of the same suite and AI mode."""
 
 from __future__ import annotations
 
@@ -62,7 +62,7 @@ class EvalRunner:
         on_result: Callable[[EvalCase, EvalResultRecord], None] | None = None,
     ) -> EvalRunRecord:
         suite = loaded.suite
-        baseline = self.store.latest_eval_run(suite.suite)
+        baseline = self.store.latest_eval_run(suite.suite, mock=self.provider.mock)
         previous = (
             {result.case_id: result.passed for result in self.store.get_eval_results(baseline.id)}
             if baseline

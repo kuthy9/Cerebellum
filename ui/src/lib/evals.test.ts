@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EvalCheck, EvalResult, EvalRun } from "../types";
-import { caseChange, describeCheck, groupBySuite, sparkPoints } from "./evals";
+import { aiMode, caseChange, describeCheck, groupBySuite, sparkPoints } from "./evals";
 
 const run = (id: string, suite: string, extra: Partial<EvalRun> = {}): EvalRun => ({
   id,
@@ -79,6 +79,13 @@ describe("describeCheck", () => {
   it("shows why an assertion failed", () => {
     expect(describeCheck({ ...base, kind: "assert", target: "run.cost_usd < 1", actual: null })).toBe("assert run.cost_usd < 1 → false");
     expect(describeCheck({ ...base, kind: "assert", target: "'x' in error", actual: "TypeError: boom" })).toBe("assert 'x' in error → TypeError: boom");
+  });
+});
+
+describe("aiMode", () => {
+  it("names the AI an eval ran with, so a baseline's mode is visible", () => {
+    expect(aiMode(run("ev_1", "a"))).toBe("mock");
+    expect(aiMode(run("ev_2", "a", { mock: false }))).toBe("claude");
   });
 });
 
