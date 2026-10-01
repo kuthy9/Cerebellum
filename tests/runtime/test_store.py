@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 from datetime import date
 from decimal import Decimal
@@ -252,6 +253,23 @@ def test_values_are_json_safe(store, simple_workflow):
     )
     assert store.get_events(run.run_id)[-1].data["amount"] == 12.5
     assert store.get_events(run.run_id)[-1].data["day"] == "2026-10-01"
+
+
+def test_failed_commit_rolls_back_and_frees_the_connection(store, simple_workflow):
+    """SQLite keeps the transaction open when COMMIT itself fails (SQLITE_BUSY, or as here a
+    deferred constraint); the shared connection must not be left inside it."""
+    conn = store._conn
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE child (pid INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        with store._tx() as tx:
+            tx.execute("INSERT INTO child (pid) VALUES (1)")  # only checked at COMMIT
+    assert not conn.in_transaction
+    assert conn.execute("SELECT COUNT(*) FROM child").fetchone()[0] == 0
+    store.save_workflow(simple_workflow)  # the next write transaction starts normally
 
 
 def test_concurrent_writers_on_one_database(settings, simple_workflow):

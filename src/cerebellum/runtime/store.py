@@ -494,10 +494,13 @@ class Store:
             tx = _Tx(self._conn, self.clock.now())
             try:
                 yield tx
+                self._conn.execute("COMMIT")
             except BaseException:
-                self._conn.execute("ROLLBACK")
+                # Also when COMMIT itself failed (e.g. SQLITE_BUSY): SQLite then keeps the
+                # transaction open. Some errors have already rolled it back.
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
                 raise
-            self._conn.execute("COMMIT")
         for event in tx.events:
             for listener in list(self._listeners):
                 try:
