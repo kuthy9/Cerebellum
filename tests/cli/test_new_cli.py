@@ -1,4 +1,5 @@
 import json
+import os
 
 import pytest
 from rich.console import Console
@@ -80,6 +81,49 @@ def test_new_refuses_to_overwrite_without_force(runner, monkeypatch, tmp_path):
     assert target.read_text(encoding="utf-8") == "keep me\n" and provider.calls == []
     assert invoke(runner, "new", "x", "-o", target, "--force").exit_code == 0
     assert target.read_text(encoding="utf-8").startswith(DRAFT_HEADER)
+
+
+def refuse_provider(monkeypatch):
+    def create(settings):
+        raise AssertionError("the provider must not be created for an unusable output target")
+
+    monkeypatch.setattr(cli, "_draft_provider", create)
+
+
+def test_new_refuses_a_directory_as_output_before_calling_claude(runner, monkeypatch, tmp_path):
+    """Review finding: -o naming a directory failed with a traceback after the paid call."""
+    refuse_provider(monkeypatch)
+    for extra in ((), ("--force",)):
+        result = invoke(runner, "new", "x", "-o", tmp_path, *extra)
+        assert result.exit_code == 2, result.text
+        assert isinstance(result.exception, SystemExit)
+        assert "is a directory" in result.text
+
+
+def test_new_refuses_an_output_it_cannot_create_before_calling_claude(
+    runner, monkeypatch, tmp_path
+):
+    refuse_provider(monkeypatch)
+    blocker = tmp_path / "notes.txt"
+    blocker.write_text("a file, not a directory\n", encoding="utf-8")
+    result = invoke(runner, "new", "x", "-o", blocker / "sub" / "w.yaml")
+    assert result.exit_code == 2 and isinstance(result.exception, SystemExit), result.text
+    assert "not a directory" in result.text
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_new_refuses_an_unwritable_directory_before_calling_claude(runner, monkeypatch, tmp_path):
+    refuse_provider(monkeypatch)
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        result = invoke(runner, "new", "x", "-o", locked / "w.yaml")
+        assert result.exit_code == 2 and isinstance(result.exception, SystemExit), result.text
+        assert "not writable" in result.text and str(locked) in result.text
+    finally:
+        locked.chmod(0o700)
+    assert not (locked / "w.yaml").exists()
 
 
 def test_new_reports_issues_when_the_draft_stays_invalid(runner, monkeypatch, tmp_path):

@@ -229,6 +229,29 @@ def _draft_provider(settings: Settings) -> AIProvider:
     return AnthropicProvider(pricing=Pricing.load(settings.pricing_file))
 
 
+def _check_output(output: Path, *, force: bool) -> None:
+    """Refuse an output path `new` could not write to (a directory, an existing file without
+    --force, or a parent it cannot create or write in)."""
+    if output.is_dir():
+        _fail(
+            f"{output} is a directory; pass a file path such as {output / 'workflow.yaml'}",
+            EXIT_INVALID,
+        )
+    if output.exists():
+        if not force:
+            _fail(f"{output} already exists; pass --force to overwrite it", EXIT_INVALID)
+        if not os.access(output, os.W_OK):
+            _fail(f"{output} is not writable", EXIT_INVALID)
+        return
+    existing = output.absolute().parent  # the nearest existing directory is where it is created
+    while not existing.exists():
+        existing = existing.parent
+    if not existing.is_dir():
+        _fail(f"cannot create {output}: {existing} is not a directory", EXIT_INVALID)
+    if not os.access(existing, os.W_OK | os.X_OK):
+        _fail(f"cannot create {output}: {existing} is not writable", EXIT_INVALID)
+
+
 @contextlib.contextmanager
 def _sandbox(settings: Settings, fail: str, *, enabled: bool) -> Iterator[SandboxHandle | None]:
     """Run the sandbox payments API for one command. Unless the user set SANDBOX_URL_ENV,
@@ -455,8 +478,7 @@ def new(
 ) -> None:
     """Draft a workflow from a description with Claude; review the draft before running it."""
     settings = _settings()
-    if output.exists() and not force:
-        _fail(f"{output} already exists; pass --force to overwrite it", EXIT_INVALID)
+    _check_output(output, force=force)  # before the provider is created and Claude is paid
     provider = _draft_provider(settings)
     console.print(render.header("new workflow", f"drafting with Claude API ({settings.model})"))
     try:
@@ -470,8 +492,11 @@ def new(
         raise typer.Exit(EXIT_INVALID) from None
     except CerebellumError as exc:
         _fail(str(exc))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(DRAFT_HEADER + draft.yaml.rstrip() + "\n", encoding="utf-8")
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(DRAFT_HEADER + draft.yaml.rstrip() + "\n", encoding="utf-8")
+    except OSError as exc:  # changed since the check above
+        _fail(f"cannot write {output}: {exc.strerror or exc}")
     wf = draft.workflow
     line = Text("● ", style="green") + Text(str(output), style="bold")
     line.append(
