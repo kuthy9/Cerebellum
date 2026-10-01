@@ -143,3 +143,40 @@ def test_an_empty_text_setting_means_unset():
     )
     for blank in ("", "  "):
         assert Settings.from_env(dict.fromkeys(names, blank)) == Settings.from_env({}), blank
+
+
+def test_text_settings_are_trimmed(tmp_path):
+    """Review finding: only the emptiness test stripped these values, so CEREBELLUM_UI_HOST=
+    'localhost ' failed to resolve, CEREBELLUM_HOME=' /tmp/x' became a relative path and
+    CEREBELLUM_MODEL kept its trailing space."""
+    settings = Settings.from_env(
+        {
+            "CEREBELLUM_HOME": f" {tmp_path}  ",
+            "CEREBELLUM_MODEL": "claude-sonnet-5-5 ",
+            "CEREBELLUM_SANDBOX_HOST": "\tlocalhost",
+            "CEREBELLUM_UI_HOST": "localhost \n",
+            "CEREBELLUM_PRICING_FILE": f"  {tmp_path / 'prices.json'} ",
+        }
+    )
+    assert settings.home == tmp_path and settings.home.is_absolute()
+    assert settings.model == "claude-sonnet-5-5"
+    assert (settings.sandbox_host, settings.ui_host) == ("localhost", "localhost")
+    assert settings.pricing_file == tmp_path / "prices.json"
+
+
+@pytest.mark.parametrize("value", ["1", "true", "TRUE", "Yes", "on", " On "])
+def test_mock_setting_accepts_the_words_for_yes(value):
+    assert Settings.from_env({"CEREBELLUM_MOCK": value}).force_mock is True
+
+
+@pytest.mark.parametrize("value", ["0", "false", "False", "NO", "off", " off ", "", "  "])
+def test_mock_setting_accepts_the_words_for_no_and_empty(value):
+    assert Settings.from_env({"CEREBELLUM_MOCK": value}).force_mock is False
+
+
+@pytest.mark.parametrize("value", ["maybe", "2", "y", "enabled", "-1"])
+def test_any_other_mock_setting_is_a_config_error_naming_it(value):
+    """Review finding: CEREBELLUM_MOCK accepted any value silently ('maybe' meant false)."""
+    with pytest.raises(ConfigError) as caught:
+        Settings.from_env({"CEREBELLUM_MOCK": value})
+    assert "CEREBELLUM_MOCK" in str(caught.value) and repr(value) in str(caught.value)

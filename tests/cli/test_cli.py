@@ -588,6 +588,35 @@ def test_a_server_that_cannot_start_exits_1(runner, free_port, command, what):
     assert f"the {what} could not start on 127.0.0.1:{free_port}" in result.text, result.text
 
 
+@pytest.mark.parametrize("source", ["flag", "env"])
+def test_ui_and_sandbox_trim_their_bind_host(runner, monkeypatch, source):
+    """Review finding: CEREBELLUM_UI_HOST='localhost ' (and --host the same) printed the
+    no-authentication warning, then failed to resolve the host and exited 3."""
+    calls = fake_server(monkeypatch)
+    sandbox_calls = fake_sandbox_server(monkeypatch)
+    for command, variable, served in (
+        (("ui", "--no-sandbox", "--mock"), "CEREBELLUM_UI_HOST", calls),
+        (("sandbox",), "CEREBELLUM_SANDBOX_HOST", sandbox_calls),
+    ):
+        args = list(command)
+        if source == "env":
+            monkeypatch.setenv(variable, " localhost ")
+        else:
+            args += ["--host", " localhost "]
+        result = invoke(runner, *args)
+        assert result.exit_code == 0, result.text
+        assert served["host"] == "localhost", command
+        assert "no authentication" not in result.text
+        assert "http://localhost:" in result.text
+
+
+def test_an_unknown_mock_setting_is_a_clear_error(runner, monkeypatch):
+    monkeypatch.setenv("CEREBELLUM_MOCK", "maybe")
+    result = invoke(runner, "runs")
+    assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.text
+    assert "CEREBELLUM_MOCK" in result.text and "'maybe'" in result.text
+
+
 def test_ui_reports_whether_mock_ai_was_requested(runner, monkeypatch):
     calls = fake_server(monkeypatch)
     monkeypatch.delenv("CEREBELLUM_MOCK")

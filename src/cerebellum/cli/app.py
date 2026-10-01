@@ -885,7 +885,7 @@ def sandbox(
         mode = FailMode.parse(fail)
     except ValueError as exc:
         _fail(str(exc), EXIT_INVALID)
-    bind_host = host or settings.sandbox_host
+    bind_host = (host or "").strip() or settings.sandbox_host  # as CEREBELLUM_SANDBOX_HOST
     bind_port = settings.sandbox_port if port is None else port
     console.print(
         render.header("sandbox payments API", f"http://{bind_host}:{bind_port} · fail mode {mode}")
@@ -920,7 +920,7 @@ def ui(
 ) -> None:
     """Serve the dashboard: live runs, traces, approvals, tasks and workflows."""
     settings = _settings()
-    bind_host = host or settings.ui_host
+    bind_host = (host or "").strip() or settings.ui_host  # as CEREBELLUM_UI_HOST
     bind_port = settings.ui_port if port is None else port
     # Bound to this machine only (under any spelling of loopback): answer only requests
     # addressed to it, against DNS rebinding. Otherwise anyone who can reach it may use it.

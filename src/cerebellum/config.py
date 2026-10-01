@@ -49,7 +49,9 @@ SANDBOX_INTERRUPT_RETRY_SECONDS = 0.05
 # Far above any real model, low enough that costs stay finite numbers a budget can compare.
 MAX_PRICE_PER_MILLION_TOKENS = 1_000_000.0
 
-_TRUTHY = {"1", "true", "yes", "on"}
+# The values a yes/no setting (CEREBELLUM_MOCK) accepts, in any case; any other is an error.
+_TRUTHY = ("1", "true", "yes", "on")
+_FALSY = ("0", "false", "no", "off")
 _CREDENTIAL_ENV_VARS = (
     "ANTHROPIC_API_KEY",
     "ANTHROPIC_AUTH_TOKEN",
@@ -84,7 +86,7 @@ class Settings:
         return cls(
             home=Path(_setting(env, "CEREBELLUM_HOME") or DEFAULT_HOME).expanduser(),
             model=_setting(env, "CEREBELLUM_MODEL") or DEFAULT_MODEL,
-            force_mock=env.get("CEREBELLUM_MOCK", "").strip().lower() in _TRUTHY,
+            force_mock=_flag(env, "CEREBELLUM_MOCK"),
             pricing_file=Path(pricing).expanduser() if pricing else None,
             # An empty host would mean every interface (and turn the dashboard's Host check off).
             sandbox_host=_setting(env, "CEREBELLUM_SANDBOX_HOST") or DEFAULT_SANDBOX_HOST,
@@ -105,10 +107,21 @@ class Settings:
 
 
 def _setting(env: Mapping[str, str], name: str) -> str | None:
-    """The variable's value, or None when it is unset or empty: for every CEREBELLUM_* variable
-    an empty value means the default."""
-    value = env.get(name, "")
-    return value if value.strip() else None
+    """The variable's value without surrounding whitespace, or None when it is unset or empty:
+    for every CEREBELLUM_* variable an empty value means the default."""
+    value = env.get(name, "").strip()
+    return value or None
+
+
+def _flag(env: Mapping[str, str], name: str) -> bool:
+    """A yes/no setting: one of _TRUTHY or _FALSY in any case; unset or empty means no."""
+    raw = _setting(env, name)
+    if raw is None or raw.lower() in _FALSY:
+        return False
+    if raw.lower() in _TRUTHY:
+        return True
+    words = ", ".join((*_TRUTHY, *_FALSY))
+    raise ConfigError(f"{name} must be one of {words} (or empty), got {raw!r}")
 
 
 def _port(env: Mapping[str, str], name: str, default: int) -> int:
