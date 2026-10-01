@@ -29,14 +29,20 @@ def returns_rows(sql: str) -> bool:
 
     Only top-level words count: comments, quoted text and anything in parentheses (CTE bodies,
     subqueries) are skipped, and a WITH clause is looked past to the statement it introduces.
+    A statement opening with parentheses, like `(SELECT 1) UNION (SELECT 2)`, is a query read
+    at the depth of its first word.
     """
     words: list[str] = []
     depth = 0
+    top: int | None = None  # the depth of the statement's first word
     for token in _SQL_TOKEN.finditer(sql):
         if token["paren"]:
             depth += 1 if token["paren"] == "(" else -1
-        elif token["word"] and depth == 0:
-            words.append(token["word"].lower())
+        elif token["word"]:
+            if top is None:
+                top = depth
+            if depth == top:
+                words.append(token["word"].lower())
     if not words:
         return False
     verb = words[0]

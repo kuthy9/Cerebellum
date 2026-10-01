@@ -213,6 +213,11 @@ async def test_query_write_with_returning_outputs_its_rows_and_commits(orders):
         ('UPDATE t SET note = $$ returning $$, other = "returning"', False),
         ("UPDATE t SET note = 'it''s -- returning' WHERE id = 1", False),
         ("-- only a comment", False),
+        ("(SELECT 1) UNION (SELECT 2)", True),
+        (" /* a */ ((select 1)) union all (select 2) order by 1", True),
+        ("(VALUES (1)) EXCEPT (SELECT 2)", True),
+        ("(WITH moved AS (DELETE FROM a RETURNING *) SELECT * FROM moved)", True),
+        ("(", False),
     ],
 )
 def test_returns_rows_classifies_statements(sql, rows):
