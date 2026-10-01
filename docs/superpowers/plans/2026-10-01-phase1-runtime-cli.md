@@ -115,7 +115,7 @@ tests/
 - [ ] **Step 1: Remove the old modules and create the package skeleton**
 
 ```bash
-cd /Users/krisjiang/Desktop/Cerebellum
+cd "$(git rev-parse --show-toplevel)"
 rm src/engine.py src/message_bus.py src/scenarios.py src/cerebellum.py src/state_machine.py src/_version.py requirements.txt
 mkdir -p src/cerebellum/spec src/cerebellum/runtime src/cerebellum/sandbox src/cerebellum/cli tests/spec
 ```
