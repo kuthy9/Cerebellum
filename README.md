@@ -99,6 +99,13 @@ The full example lives in [`src/cerebellum/templates/refund/workflow.yaml`](src/
 Every step accepts `needs`, `when`, `timeout`, `retry` and `on_failure`. Expressions are
 sandboxed Jinja over `input`, `params`, `steps.<id>.{output,status,error}` and `run`.
 
+- Conditions (`when`, validation rules, eval `assert`) are lenient: a missing value is false.
+  Value templates (`params`, `body`, `prompt`, …) are strict: a missing value fails the step, so
+  write optional inputs as `{{ input.reason | default('') }}` rather than `{{ input.reason }}`.
+- `a.b` always reads the key `b`, so data keys such as `items` or `get` never turn into dict
+  methods; `.get()`, `.items()` and friends are therefore not available on data.
+- SQL text is never templated: values reach a `query` step only through `params` binds.
+
 ## Reliability semantics
 
 - **Event-sourced state.** Every state change is appended to an event log in SQLite together with
@@ -199,6 +206,10 @@ credentials; there is no offline fallback.
 | `cerebellum new "<description>" -o <file> [--force]` | Draft a workflow YAML with Claude (validated, repaired) |
 | `cerebellum demo [--live]` | Five end-to-end refund scenarios |
 
+Exit codes: `0` success (also `needs_attention`: recovered by a fallback), `1` the run failed or was
+rejected, an eval stayed below `--min-pass`, or a command could not complete, `2` invalid
+workflow, input, eval suite or option, `3` the run is waiting for a human approval.
+
 ## Configuration
 
 | Variable | Default | Meaning |
@@ -207,10 +218,12 @@ credentials; there is no offline fallback.
 | `CEREBELLUM_MODEL` | `claude-opus-5-5` | Default model for `ai` steps |
 | `CEREBELLUM_MOCK` | unset | `1` forces the mock AI |
 | `CEREBELLUM_HOME` | `./.cerebellum` | Run history and sandbox databases |
-| `CEREBELLUM_SANDBOX_PORT` | `8787` | Port of the local payments sandbox |
+| `CEREBELLUM_SANDBOX_HOST` / `CEREBELLUM_SANDBOX_PORT` | `127.0.0.1` / `8787` | Address of the local payments sandbox |
+| `CEREBELLUM_LEASE_SECONDS` | `30` | How long a run's lease lasts without a heartbeat (crash detection) |
 | `CEREBELLUM_PRICING_FILE` | unset | JSON overriding model prices |
 | `CEREBELLUM_UI_HOST` / `CEREBELLUM_UI_PORT` | `127.0.0.1` / `7400` | Dashboard bind address |
 | `CEREBELLUM_WORKER_INTERVAL` | `30` | Seconds between the dashboard's approval-timeout sweeps |
+| `CEREBELLUM_STREAM_POLL` | `0.5` | Seconds between the dashboard's event-stream polls |
 | `ORDERS_DSN` | `sandbox` | Real PostgreSQL DSN for the example (`pip install -e ".[postgres]"`, `docker compose up -d`) |
 | `PAYMENTS_URL` / `PAYMENTS_TOKEN` | sandbox | Payments API used by the example |
 
