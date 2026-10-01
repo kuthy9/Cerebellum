@@ -539,6 +539,39 @@ def test_ui_serves_the_dashboard_on_localhost(runner, monkeypatch):
     assert "no authentication" not in result.text
 
 
+def fake_sandbox_server(monkeypatch):
+    """Replace the uvicorn.run `cerebellum sandbox` serves with: record its arguments."""
+    calls = {}
+    monkeypatch.setattr(cli.uvicorn, "run", lambda app, **kwargs: calls.update(kwargs))
+    return calls
+
+
+PORT_COMMANDS = (("ui", "--no-sandbox", "--mock"), ("sandbox",))
+
+
+@pytest.mark.parametrize("command", PORT_COMMANDS)
+@pytest.mark.parametrize("port", ["70000", "65536", "-1", "0"])
+def test_a_port_flag_out_of_range_is_an_invalid_option(runner, monkeypatch, command, port):
+    """Review finding: `ui --port 70000`, `ui --port -1` and `sandbox --port 70000` ended in an
+    OverflowError traceback from bind, and `ui --port 0` silently meant the default port."""
+    calls = fake_server(monkeypatch)
+    sandbox_calls = fake_sandbox_server(monkeypatch)
+    result = invoke(runner, *command, "--port", port)
+    assert result.exit_code == 2, (command, port, result.text)
+    assert "--port" in result.text and "1<=x<=65535" in result.text, result.text
+    assert not calls and not sandbox_calls  # nothing was served
+
+
+@pytest.mark.parametrize("command", PORT_COMMANDS)
+@pytest.mark.parametrize("port", [1, 65535])
+def test_a_port_flag_accepts_the_whole_range(runner, monkeypatch, command, port):
+    calls = fake_server(monkeypatch)
+    sandbox_calls = fake_sandbox_server(monkeypatch)
+    result = invoke(runner, *command, "--port", str(port))
+    assert result.exit_code == 0, result.text
+    assert (calls or sandbox_calls)["port"] == port
+
+
 def test_ui_reports_whether_mock_ai_was_requested(runner, monkeypatch):
     calls = fake_server(monkeypatch)
     monkeypatch.delenv("CEREBELLUM_MOCK")

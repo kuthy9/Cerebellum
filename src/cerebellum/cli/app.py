@@ -36,6 +36,8 @@ from cerebellum.cli.demo import run_scenarios
 from cerebellum.config import (
     DEFAULT_EVAL_KEEP,
     DEFAULT_EVAL_MIN_PASS,
+    MAX_PORT,
+    MIN_PORT,
     Settings,
     has_anthropic_credentials,
 )
@@ -850,10 +852,16 @@ def connectors_check(
     raise typer.Exit(EXIT_OK if all(health.ok for _, _, health in results) else EXIT_FAILED)
 
 
+def _port_option(help: str) -> Any:
+    """A --port flag: the range CEREBELLUM_*_PORT accepts, so 0 ("any free port") and
+    out-of-range numbers are invalid options (exit 2) rather than a default or a bind error."""
+    return typer.Option(min=MIN_PORT, max=MAX_PORT, help=help)
+
+
 @app.command()
 def sandbox(
     host: Annotated[str | None, typer.Option(help="Bind host.")] = None,
-    port: Annotated[int | None, typer.Option(help="Bind port.")] = None,
+    port: Annotated[int | None, _port_option("Bind port.")] = None,
     fail: Annotated[
         str, typer.Option(help="Fault injection: never | always | first:N | rate:P.")
     ] = "never",
@@ -865,7 +873,7 @@ def sandbox(
     except ValueError as exc:
         _fail(str(exc), EXIT_INVALID)
     bind_host = host or settings.sandbox_host
-    bind_port = port or settings.sandbox_port
+    bind_port = settings.sandbox_port if port is None else port
     console.print(
         render.header("sandbox payments API", f"http://{bind_host}:{bind_port} · fail mode {mode}")
     )
@@ -880,7 +888,7 @@ def sandbox(
 @app.command()
 def ui(
     host: Annotated[str | None, typer.Option(help="Bind host (default 127.0.0.1).")] = None,
-    port: Annotated[int | None, typer.Option(help="Bind port (default 7400).")] = None,
+    port: Annotated[int | None, _port_option("Bind port (default 7400).")] = None,
     workflows: Annotated[
         Path, typer.Option(help="Directory scanned for workflow YAML (3 levels deep).")
     ] = Path("."),
@@ -895,7 +903,7 @@ def ui(
     """Serve the dashboard: live runs, traces, approvals, tasks and workflows."""
     settings = _settings()
     bind_host = host or settings.ui_host
-    bind_port = port or settings.ui_port
+    bind_port = settings.ui_port if port is None else port
     # Bound to this machine only (under any spelling of loopback): answer only requests
     # addressed to it, against DNS rebinding. Otherwise anyone who can reach it may use it.
     allowed_hosts = loopback_host_names(bind_host)
