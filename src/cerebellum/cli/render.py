@@ -55,6 +55,8 @@ SPAN_STYLES = {
     "retrying": "yellow",
     "waiting": "yellow",
     "running": ACCENT,
+    "interrupted": "yellow",  # cut short by a crash or shutdown; resume runs another attempt
+    "cancelled": MUTED,
 }
 
 

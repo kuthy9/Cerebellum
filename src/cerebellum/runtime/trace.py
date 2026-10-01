@@ -9,6 +9,8 @@ from typing import Any
 from cerebellum.runtime.store import EventRecord
 
 _STEP_END = {"step.succeeded", "step.failed", "step.retrying"}
+# Events that name only the step: they close its latest attempt if it is still open.
+_STEP_CLOSE = {"step.reset": "interrupted", "step.cancelled": "cancelled"}
 
 
 @dataclass(frozen=True)
@@ -20,7 +22,7 @@ class Span:
     label: str
     start: float
     end: float | None
-    status: str  # running | waiting | retrying | succeeded | failed
+    status: str  # running | waiting | retrying | succeeded | failed | interrupted | cancelled
     detail: dict[str, Any]
 
 
@@ -39,8 +41,11 @@ def call_label(kind: str, data: dict[str, Any]) -> str:
 
 def build_spans(events: Iterable[EventRecord]) -> list[Span]:
     spans: dict[str, Span] = {}
+    latest: dict[str, str] = {}  # step id -> span of its latest attempt
     for event in events:
         if event.type == "step.started" and event.span_id:
+            if event.step_id:
+                latest[event.step_id] = event.span_id
             spans[event.span_id] = Span(
                 span_id=event.span_id,
                 parent_id=None,
@@ -55,6 +60,10 @@ def build_spans(events: Iterable[EventRecord]) -> list[Span]:
                     "fallback_for": event.data.get("fallback_for"),
                 },
             )
+        elif event.type in _STEP_CLOSE and event.step_id in latest:
+            span = spans[latest[event.step_id]]
+            if span.end is None:
+                spans[span.span_id] = replace(span, end=event.ts, status=_STEP_CLOSE[event.type])
         elif event.span_id in spans and spans[event.span_id].kind == "step":
             span = spans[event.span_id]
             if event.type in _STEP_END:

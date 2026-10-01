@@ -44,6 +44,8 @@ export const SPAN_TONE: Record<string, Tone> = {
   retrying: "wait",
   waiting: "wait",
   running: "accent",
+  interrupted: "wait", // cut short by a crash or shutdown; resume runs another attempt
+  cancelled: "skip",
 };
 
 const UNKNOWN = (status: string): Look => ({ glyph: "·", tone: "faint", label: status });
