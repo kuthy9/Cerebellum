@@ -80,16 +80,17 @@ class Settings:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> Settings:
         env = os.environ if env is None else env
-        pricing = env.get("CEREBELLUM_PRICING_FILE")
+        pricing = _setting(env, "CEREBELLUM_PRICING_FILE")
         return cls(
-            home=Path(env.get("CEREBELLUM_HOME", DEFAULT_HOME)).expanduser(),
-            model=env.get("CEREBELLUM_MODEL", DEFAULT_MODEL),
+            home=Path(_setting(env, "CEREBELLUM_HOME") or DEFAULT_HOME).expanduser(),
+            model=_setting(env, "CEREBELLUM_MODEL") or DEFAULT_MODEL,
             force_mock=env.get("CEREBELLUM_MOCK", "").strip().lower() in _TRUTHY,
             pricing_file=Path(pricing).expanduser() if pricing else None,
-            sandbox_host=env.get("CEREBELLUM_SANDBOX_HOST", DEFAULT_SANDBOX_HOST),
+            # An empty host would mean every interface (and turn the dashboard's Host check off).
+            sandbox_host=_setting(env, "CEREBELLUM_SANDBOX_HOST") or DEFAULT_SANDBOX_HOST,
             sandbox_port=_port(env, "CEREBELLUM_SANDBOX_PORT", DEFAULT_SANDBOX_PORT),
             lease_seconds=_seconds(env, "CEREBELLUM_LEASE_SECONDS", DEFAULT_LEASE_SECONDS),
-            ui_host=env.get("CEREBELLUM_UI_HOST", DEFAULT_UI_HOST),
+            ui_host=_setting(env, "CEREBELLUM_UI_HOST") or DEFAULT_UI_HOST,
             ui_port=_port(env, "CEREBELLUM_UI_PORT", DEFAULT_UI_PORT),
             # 0 turns the dashboard's approval-timeout sweep off
             worker_interval=_seconds(
@@ -104,8 +105,8 @@ class Settings:
 
 
 def _setting(env: Mapping[str, str], name: str) -> str | None:
-    """The variable's value, or None when it is unset or empty (as for CEREBELLUM_PRICING_FILE
-    and CEREBELLUM_MOCK, an empty value means the default)."""
+    """The variable's value, or None when it is unset or empty: for every CEREBELLUM_* variable
+    an empty value means the default."""
     value = env.get(name, "")
     return value if value.strip() else None
 

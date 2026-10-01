@@ -303,6 +303,8 @@ def _parse_input(raw: str) -> dict[str, Any]:
             text = path.read_text(encoding="utf-8")
         except OSError as exc:
             _fail(f"cannot read input file {path}: {exc.strerror}", EXIT_INVALID)
+        except UnicodeDecodeError as exc:
+            _fail(f"cannot read input file {path}: not UTF-8 text (byte {exc.start})", EXIT_INVALID)
     try:
         # NaN, Infinity and numbers out of float range (1e400) are refused, as for --param: a
         # run's input must stay serialisable as JSON.

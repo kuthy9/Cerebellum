@@ -129,3 +129,17 @@ def test_an_empty_numeric_setting_means_unset():
     )
     assert Settings.from_env(dict.fromkeys(names, "")) == Settings.from_env({})
     assert Settings.from_env({"CEREBELLUM_SANDBOX_PORT": "  "}).sandbox_port == DEFAULT_SANDBOX_PORT
+
+
+def test_an_empty_text_setting_means_unset():
+    """Review finding: an empty CEREBELLUM_UI_HOST (a bare `CEREBELLUM_UI_HOST=` line in .env)
+    bound the dashboard to every interface with its Host check off; an empty home, model or
+    sandbox host also replaced the default with ''."""
+    names = (
+        "CEREBELLUM_HOME",
+        "CEREBELLUM_MODEL",
+        "CEREBELLUM_SANDBOX_HOST",
+        "CEREBELLUM_UI_HOST",
+    )
+    for blank in ("", "  "):
+        assert Settings.from_env(dict.fromkeys(names, blank)) == Settings.from_env({}), blank

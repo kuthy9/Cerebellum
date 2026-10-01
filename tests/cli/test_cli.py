@@ -285,6 +285,16 @@ def test_run_rejects_non_finite_numbers_in_input(runner, tmp_path, bad):
     assert "no runs yet" in invoke(runner, "runs").text
 
 
+def test_an_input_file_that_is_not_utf8_is_invalid_input(runner, tmp_path):
+    """Review finding: a non-UTF-8 --input file ended in a UnicodeDecodeError traceback."""
+    path = tmp_path / "input.json"
+    path.write_bytes(b'{"order_id": "\xff"}')
+    result = invoke(runner, "run", WORKFLOW, "-i", f"@{path}")
+    assert result.exit_code == 2, result.text
+    assert isinstance(result.exception, SystemExit)
+    assert f"cannot read input file {path}" in result.text and "UTF-8" in result.text
+
+
 def test_run_stores_a_non_finite_param_as_text(runner):
     result = invoke(
         runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'small.json'}", "-p", "approval_threshold=NaN"
