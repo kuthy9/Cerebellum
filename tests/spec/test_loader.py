@@ -108,6 +108,17 @@ def test_missing_env_var_without_default():
     ]
 
 
+def test_unset_env_vars_stay_unresolved_when_not_required():
+    """For display only: the workflow parses, unset variables are kept as written."""
+    text = variant(
+        lambda d: d["connectors"]["api"].update(base_url="${PAYMENTS_URL}/v1${SUFFIX:-}")
+    )
+    wf = parse_workflow(text, env={}, require_env=False)
+    assert wf.connectors["api"].base_url == "${PAYMENTS_URL}/v1"
+    resolved = parse_workflow(text, env={"PAYMENTS_URL": "https://p.example"}, require_env=False)
+    assert resolved.connectors["api"].base_url == "https://p.example/v1"
+
+
 def test_invalid_yaml():
     assert issues_of("name: [unclosed")[0].startswith("<yaml>:")
 

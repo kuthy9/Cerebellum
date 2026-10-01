@@ -216,6 +216,40 @@ def test_status_of_unknown_run(runner):
     assert result.exit_code == 1 and "not found" in result.text
 
 
+ENV_FLOW = """
+name: needs_env
+connectors:
+  api: {type: rest, base_url: "${CEREBELLUM_TEST_API_URL}"}
+steps:
+  - {id: gate, type: approval, title: Go ahead}
+  - {id: call, type: http, needs: [gate], connector: api, method: GET, path: /ping}
+"""
+
+
+def test_status_shows_a_run_whose_connector_variables_are_unset(runner, tmp_path, monkeypatch):
+    """Review finding: `status` opens no connector, yet failed when the snapshot's ${VAR}s were
+    unset in this shell. Resuming the run still needs the real values."""
+    flow = tmp_path / "needs_env.yaml"
+    flow.write_text(ENV_FLOW, encoding="utf-8")
+    monkeypatch.setenv("CEREBELLUM_TEST_API_URL", "http://127.0.0.1:9")
+    started = invoke(runner, "run", str(flow))
+    assert started.exit_code == 3, started.text
+    run_id = run_id_of(started)
+    monkeypatch.delenv("CEREBELLUM_TEST_API_URL")
+
+    status = invoke(runner, "status", run_id)
+    assert status.exit_code == 0, status.text
+    assert "gate" in status.text and "call" in status.text and "awaiting approval" in status.text
+    trace = invoke(runner, "trace", run_id)
+    assert trace.exit_code == 0, trace.text
+
+    for command in (("resume", run_id), ("approve", run_id, "--by", "alice")):
+        refused = invoke(runner, *command)
+        assert refused.exit_code == 2, refused.text
+        assert "CEREBELLUM_TEST_API_URL is not set" in refused.text
+    assert invoke(runner, "approvals").text.count(run_id) == 1  # still pending
+
+
 def test_runs_rejects_unknown_status(runner):
     result = invoke(runner, "runs", "--status", "bogus")
     assert result.exit_code == 2 and "waiting_approval" in result.text

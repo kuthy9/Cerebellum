@@ -146,9 +146,11 @@ def _get_run(store: Store, run_id: str) -> RunRecord:
         _fail(str(exc))
 
 
-def _run_workflow(store: Store, run: RunRecord) -> Workflow:
+def _run_workflow(store: Store, run: RunRecord, *, display_only: bool = False) -> Workflow:
+    """The run's workflow snapshot. Display-only callers open no connector, so they tolerate
+    connector variables that are unset in this shell; driving the run needs their values."""
     try:
-        return load_run_workflow(store, run)
+        return load_run_workflow(store, run, require_env=not display_only)
     except SpecError as exc:
         _invalid("the run's workflow snapshot is invalid in this environment", exc)
 
@@ -511,7 +513,7 @@ def status(run_id: Annotated[str, typer.Argument(help="Run id.")]) -> None:
     settings = _settings()
     with Store(settings.db_path) as store:
         run = _get_run(store, run_id)
-        workflow = _run_workflow(store, run)
+        workflow = _run_workflow(store, run, display_only=True)
         steps = store.get_steps(run_id)
         console.print(
             render.run_view(run, workflow, steps, mode=_mode(run), stale=store.is_stale(run))
