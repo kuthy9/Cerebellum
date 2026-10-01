@@ -28,7 +28,7 @@ from cerebellum.config import DEFAULT_UI_SHUTDOWN_GRACE_SECONDS, Settings
 from cerebellum.errors import CerebellumError, NotFound, SpecError
 from cerebellum.runtime.engine import load_run_workflow
 from cerebellum.runtime.states import RunStatus
-from cerebellum.runtime.store import RunRecord, Store
+from cerebellum.runtime.store import EvalRunRecord, RunRecord, Store
 from cerebellum.runtime.trace import build_spans
 from cerebellum.server import serialize as js
 from cerebellum.server.catalog import Catalog
@@ -42,7 +42,7 @@ LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 # index.html names the hashed /assets files of the current build, so browsers must revalidate it
 # (or a rebuilt UI would load the old assets); the hashed assets themselves may stay cached.
 INDEX_HEADERS = {"Cache-Control": "no-cache"}
-# How many runs of a suite the eval detail returns for its trend line.
+# How many runs of each suite the eval list and the eval detail return for their trend lines.
 EVAL_HISTORY = 30
 UI_MISSING = """<!doctype html>
 <html lang="en"><head><meta charset="utf-8"><title>Cerebellum</title></head>
@@ -291,11 +291,21 @@ def create_app(
             raise HTTPException(400, str(exc)) from exc
         return {**active.metrics(active.clock.now() - seconds), "window": window}
 
+    def eval_json(active: Store, record: EvalRunRecord) -> dict[str, Any]:
+        # Stale: still "running" with no heartbeat for a lease period (its process died).
+        stale = active.is_eval_stale(record, timeout=settings.lease_seconds)
+        return js.eval_run_json(record, stale=stale)
+
     @app.get("/api/evals")
-    async def list_evals(request: Request, suite: str | None = None, limit: int = 100):
+    async def list_evals(request: Request, suite: str | None = None, limit: int = EVAL_HISTORY):
+        """The newest `limit` runs of each suite (or of `suite`), newest first."""
         active, _, _ = parts(request)
-        records = active.list_eval_runs(suite=suite, limit=min(max(limit, 1), 500))
-        return {"evals": [js.eval_run_json(record) for record in records]}
+        limit = min(max(limit, 1), 500)
+        if suite is None:
+            records = active.list_eval_runs_per_suite(limit)
+        else:
+            records = active.list_eval_runs(suite=suite, limit=limit)
+        return {"evals": [eval_json(active, record) for record in records]}
 
     @app.get("/api/evals/{eval_run_id}")
     async def eval_detail(eval_run_id: str, request: Request):
@@ -308,10 +318,10 @@ def create_app(
         history = active.list_eval_runs(suite=record.suite, limit=EVAL_HISTORY)
         history.reverse()
         return {
-            "eval": js.eval_run_json(record),
-            "baseline": None if baseline is None else js.eval_run_json(baseline),
+            "eval": eval_json(active, record),
+            "baseline": None if baseline is None else eval_json(active, baseline),
             "results": [js.eval_result_json(r) for r in active.get_eval_results(eval_run_id)],
-            "history": [js.eval_run_json(r) for r in history],
+            "history": [eval_json(active, r) for r in history],
         }
 
     # The catalog walks the --workflows tree and parses what changed: in a worker thread, so a

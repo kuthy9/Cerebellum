@@ -15,6 +15,7 @@ from rich.tree import Tree
 
 from cerebellum.connectors import HealthStatus
 from cerebellum.errors import SpecIssue
+from cerebellum.evals.prune import PrunedHome
 from cerebellum.evals.targets import Target
 from cerebellum.runtime.store import (
     ApprovalRecord,
@@ -380,6 +381,15 @@ def eval_targets(targets: Sequence[Target]) -> Group:
     return Group(*lines)
 
 
+def sandbox_reused(url: str) -> Text:
+    """The eval borrows a sandbox another process (e.g. `cerebellum ui`) started."""
+    return Text("! ", style="yellow") + Text(
+        f"reusing the sandbox payments API at {url} (another process started it, e.g. "
+        "cerebellum ui): runs started there meanwhile also see this eval's fail modes",
+        style="yellow",
+    )
+
+
 def eval_case_line(result: EvalResultRecord) -> Group:
     glyph, style = ("●", "green") if result.passed else ("✕", "red")
     line = Text()
@@ -396,6 +406,31 @@ def eval_case_line(result: EvalResultRecord) -> Group:
         if not check["passed"]:
             lines.append(Text(f"     {describe_check(check)}", style="red"))
     return Group(*lines)
+
+
+def pruned_view(pruned: Sequence[PrunedHome], keep: int) -> Group:
+    """What `cerebellum evals prune` removed."""
+    if not pruned:
+        return Group(
+            Text(
+                f"nothing to prune: no suite has sandbox directories beyond its newest {keep}",
+                style=MUTED,
+            )
+        )
+    lines = [
+        Text(f"  - {item.path}  ", style="red") + Text(item.suite, style=MUTED) for item in pruned
+    ]
+    noun = "directory" if len(pruned) == 1 else "directories"
+    lines.append(
+        Text("● ", style="green")
+        + Text(f"removed {len(pruned)} sandbox {noun}; kept the newest {keep} per suite")
+    )
+    lines.append(Text("  eval results stay in the history: cerebellum ui → /evals", style=MUTED))
+    return Group(*lines)
+
+
+def ai_mode(mock: bool) -> str:
+    return "mock AI" if mock else "Claude API"
 
 
 def eval_summary(
@@ -419,11 +454,14 @@ def eval_summary(
         )
     lines = [head]
     if baseline is None:
-        lines.append(Text("   first run of this suite: nothing to compare with", style=MUTED))
+        mode = "mock AI" if record.mock else "the Claude API"
+        lines.append(
+            Text(f"   first run of this suite with {mode}: nothing to compare with", style=MUTED)
+        )
     else:
         compare = Text(
-            f"   vs {baseline.id}: {baseline.passed}/{baseline.total} → "
-            f"{record.passed}/{record.total}",
+            f"   vs {baseline.id} ({ai_mode(baseline.mock)}): {baseline.passed}/{baseline.total}"
+            f" → {record.passed}/{record.total}",
             style=MUTED,
         )
         if regressed:

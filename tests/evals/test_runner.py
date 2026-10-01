@@ -1,3 +1,5 @@
+import asyncio
+import dataclasses
 import shutil
 
 import httpx
@@ -73,6 +75,28 @@ async def test_suite_is_repeatable_and_isolated(make_runner, store, settings):
     for record in (first, second):
         assert (eval_home(settings, record.id) / "sandbox_orders_db.db").is_file()
     assert not (settings.home / "sandbox_orders_db.db").exists()
+
+
+async def test_baseline_is_the_previous_run_with_the_same_ai_mode(make_runner, store, clock):
+    """Review finding: a mock eval was compared with a newer Claude eval of the suite."""
+    loaded = load_suite(SUITE, env={})
+    mock_run = await make_runner().run(loaded)
+    clock.advance(1)
+    store.create_eval_run(
+        "ev_0000c1a0",
+        suite=loaded.suite.suite,
+        suite_path=str(loaded.path),
+        workflow_name=loaded.workflow.name,
+        workflow_digest=loaded.workflow.digest,
+        mock=False,
+        total=len(loaded.suite.cases),
+        baseline_id=None,
+    )
+    store.finish_eval_run("ev_0000c1a0", status="completed")
+    clock.advance(1)
+    again = await make_runner().run(loaded)
+    assert again.baseline_id == mock_run.id
+    assert again.regressions == 0
 
 
 async def test_breaking_the_threshold_is_flagged_as_regression(make_runner, store, tmp_path):
@@ -160,8 +184,145 @@ async def test_interrupted_eval_is_marked_errored(make_runner, store):
     [record] = store.list_eval_runs()
     assert record.status == "errored" and record.error == "operator pressed Ctrl-C"
     assert record.passed == 1 and record.ended_at is not None
-    assert store.latest_eval_run("refund_regression") is None
+    assert store.latest_eval_run("refund_regression", mock=True) is None
     assert calls[-1] == "never"  # the sandbox is put back to normal
+
+
+def small_suite(tmp_path, name="small_only"):
+    path = tmp_path / f"{name}.yaml"
+    path.write_text(
+        f"""
+suite: {name}
+workflow: {WORKFLOW}
+cases:
+  - id: small
+    input: {{order_id: A1001, amount: 120}}
+    expect: {{status: succeeded}}
+""",
+        encoding="utf-8",
+    )
+    return load_suite(path, env={})
+
+
+async def test_runner_records_a_heartbeat_while_cases_run(
+    store, settings, payments, clock, tmp_path
+):
+    """Review finding: eval_runs had no liveness signal, so a killed eval looked running."""
+    fast = dataclasses.replace(settings, lease_seconds=0.15)  # a heartbeat every 0.05 s
+    seen = []
+
+    async def slow_setter(mode):
+        clock.advance(100)
+        await asyncio.sleep(0.3)
+        [running] = store.list_eval_runs()
+        seen.append(running.heartbeat_at == clock.now())
+        payments.set_fail_mode(FailMode.parse(mode))
+
+    runner = EvalRunner(
+        store,
+        fast,
+        MockProvider(latency=(0, 0)),
+        set_fail_mode=slow_setter,
+        http_transports={"payments": httpx.ASGITransport(app=create_payments_app(payments))},
+        jitter=0,
+    )
+    record = await runner.run(small_suite(tmp_path))
+    assert record.status == "completed" and seen[0] is True  # written while the case ran
+
+
+async def test_next_eval_of_the_suite_marks_a_killed_eval_abandoned(
+    make_runner, store, settings, clock, tmp_path
+):
+    loaded = small_suite(tmp_path)
+    for eval_run_id, suite in (("ev_0000dead", "small_only"), ("ev_0000beef", "other")):
+        store.create_eval_run(  # their processes were killed: nothing finished them
+            eval_run_id,
+            suite=suite,
+            suite_path=str(loaded.path),
+            workflow_name=loaded.workflow.name,
+            workflow_digest=loaded.workflow.digest,
+            mock=True,
+            total=1,
+            baseline_id=None,
+        )
+    clock.advance(settings.lease_seconds + 1)
+    record = await make_runner().run(loaded)
+    dead = store.get_eval_run("ev_0000dead")
+    assert dead.status == "errored" and dead.error.startswith("abandoned")
+    assert store.get_eval_run("ev_0000beef").status == "running"  # another suite's eval
+    assert record.status == "completed" and record.baseline_id is None
+
+
+LARGE_REFUND = {"order_id": "A1002", "amount": 899}  # waits for a manager's approval
+
+
+async def test_interrupted_eval_closes_the_approval_it_left_pending(
+    make_runner, store, monkeypatch, tmp_path
+):
+    """Review finding: an eval interrupted between a case's start and its approval decision
+    left a pending approval nobody may decide, listed in the dashboard's Approvals forever."""
+    path = tmp_path / "evals.yaml"
+    path.write_text(
+        f"""
+suite: needs_approval
+workflow: {WORKFLOW}
+cases:
+  - id: large
+    input: {{order_id: A1002, amount: 899}}
+    expect: {{status: succeeded}}
+""",
+        encoding="utf-8",
+    )
+
+    class Boom(Exception):
+        pass
+
+    async def interrupted_decide(*args, **kwargs):
+        raise Boom("operator pressed Ctrl-C")
+
+    monkeypatch.setattr(Engine, "decide", interrupted_decide)
+    with pytest.raises(Boom):
+        await make_runner().run(load_suite(path, env={}))
+    [record] = store.list_eval_runs()
+    assert record.status == "errored"
+    assert store.list_approvals(status="pending") == []
+    [approval] = store.list_approvals()
+    assert (approval.status, approval.decided_by) == ("rejected", "eval")
+    assert "interrupted" in approval.comment
+    run = store.get_run(approval.run_id)
+    assert run.eval_run_id == record.id
+    assert run.status is RunStatus.WAITING_APPROVAL  # not resumed: eval runs are records
+
+
+async def test_abandoning_a_killed_eval_closes_its_pending_approval(
+    make_runner, store, settings, payments, clock, tmp_path
+):
+    loaded = small_suite(tmp_path)
+    store.create_eval_run(
+        "ev_0000dead",
+        suite=loaded.suite.suite,
+        suite_path=str(loaded.path),
+        workflow_name=loaded.workflow.name,
+        workflow_digest=loaded.workflow.digest,
+        mock=True,
+        total=1,
+        baseline_id=None,
+    )
+    killed = Engine(  # the killed eval's engine, stopped while its case waited
+        store,
+        settings,
+        MockProvider(latency=(0, 0)),
+        http_transports={"payments": httpx.ASGITransport(app=create_payments_app(payments))},
+        eval_runs=True,
+    )
+    waiting = await killed.start(loaded.workflow, LARGE_REFUND, eval_run_id="ev_0000dead")
+    assert waiting.status is RunStatus.WAITING_APPROVAL
+    clock.advance(settings.lease_seconds + 1)
+    await make_runner().run(loaded)
+    assert store.get_eval_run("ev_0000dead").status == "errored"
+    [approval] = store.list_approvals(run_id=waiting.run_id)
+    assert approval.status == "rejected" and "interrupted" in approval.comment
+    assert store.get_run(waiting.run_id).status is RunStatus.WAITING_APPROVAL
 
 
 async def test_eval_runs_are_records_that_cannot_be_resumed_or_decided(

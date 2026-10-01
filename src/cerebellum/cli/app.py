@@ -32,18 +32,25 @@ from cerebellum.ai.pricing import Pricing
 from cerebellum.authoring import DRAFT_HEADER, DraftError, draft_workflow
 from cerebellum.cli import render
 from cerebellum.cli.demo import run_scenarios
-from cerebellum.config import DEFAULT_EVAL_MIN_PASS, Settings, has_anthropic_credentials
+from cerebellum.config import (
+    DEFAULT_EVAL_KEEP,
+    DEFAULT_EVAL_MIN_PASS,
+    Settings,
+    has_anthropic_credentials,
+)
 from cerebellum.connectors import ConnectorEnv, HealthStatus, create_connector
 from cerebellum.connectors.postgres import sandbox_db_path
 from cerebellum.errors import CerebellumError, ConfigError, LeaseUnavailable, SpecError, StepError
 from cerebellum.evals import EvalRunner, LoadedSuite, load_suite
+from cerebellum.evals.lock import EvalBusy, EvalLock
+from cerebellum.evals.prune import prune_eval_homes
 from cerebellum.evals.targets import connector_targets
 from cerebellum.runtime.engine import Engine, load_run_workflow
 from cerebellum.runtime.states import RunStatus
 from cerebellum.runtime.store import EventRecord, RunRecord, Store
 from cerebellum.runtime.trace import build_spans
 from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments_app
-from cerebellum.sandbox.server import SandboxHandle, start_sandbox
+from cerebellum.sandbox.server import SandboxHandle, sandbox_url, start_sandbox
 from cerebellum.server import create_app
 from cerebellum.server.app import LOOPBACK_HOSTS, dashboard_server
 from cerebellum.spec import load_workflow
@@ -76,8 +83,10 @@ app = typer.Typer(
 )
 tasks_app = typer.Typer(help="Manual task inbox (fallback hand-offs).")
 connectors_app = typer.Typer(help="Connector utilities.", no_args_is_help=True)
+evals_app = typer.Typer(help="Eval run housekeeping.", no_args_is_help=True)
 app.add_typer(tasks_app, name="tasks")
 app.add_typer(connectors_app, name="connectors")
+app.add_typer(evals_app, name="evals")
 
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
@@ -146,9 +155,9 @@ def _load(path: Path) -> Workflow:
         _invalid(f"{path} is invalid", exc)
 
 
-def _load_suite(path: Path) -> LoadedSuite:
+def _load_suite(path: Path, env: dict[str, str] | None = None) -> LoadedSuite:
     try:
-        return load_suite(path)
+        return load_suite(path, env=env)
     except SpecError as exc:
         _invalid(f"{path} is invalid", exc)
 
@@ -269,6 +278,20 @@ def _sandbox(settings: Settings, fail: str, *, enabled: bool) -> Iterator[Sandbo
         if not configured:
             os.environ.pop(SANDBOX_URL_ENV, None)
         handle.stop()
+
+
+@contextlib.contextmanager
+def _eval_lock(settings: Settings) -> Iterator[None]:
+    """Hold this home's eval lock for one command, or stop at once if another eval holds it."""
+    lock = EvalLock(settings.home)
+    try:
+        lock.acquire()
+    except EvalBusy as exc:
+        _fail(str(exc))
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _parse_input(raw: str) -> dict[str, Any]:
@@ -893,8 +916,13 @@ def eval_suite(
 ) -> None:
     """Run an eval suite: one run per case, checked and compared with the previous run."""
     settings = _settings()
-    with _sandbox(settings, "never", enabled=not no_sandbox) as handle:
-        loaded = _load_suite(suite)  # after the sandbox starts: connector URLs may point at it
+    # Validate before starting anything, with the environment the run will have: unless the
+    # user set SANDBOX_URL_ENV, the sandbox sets it to its own URL (connectors may read it).
+    env = dict(os.environ)
+    if not no_sandbox and SANDBOX_URL_ENV not in env:
+        env[SANDBOX_URL_ENV] = sandbox_url(settings.sandbox_host, settings.sandbox_port)
+    loaded = _load_suite(suite, env)
+    with _eval_lock(settings), _sandbox(settings, "never", enabled=not no_sandbox) as handle:
         choice = select_provider(settings, force_mock=mock or loaded.suite.defaults.mock)
         with Store(settings.db_path) as store:
             runner = EvalRunner(
@@ -908,6 +936,8 @@ def eval_suite(
             )
             targets = connector_targets(loaded.workflow, handle.url if handle else None)
             console.print(render.eval_targets(targets))
+            if handle is not None and not handle.owned:
+                console.print(render.sandbox_reused(handle.url))
             console.print(Rule(style=render.MUTED))
             record = asyncio.run(
                 runner.run(
@@ -921,6 +951,20 @@ def eval_suite(
             console.print(render.eval_summary(record, baseline, regressed, min_pass))
     passed = record.passed / record.total + 1e-9 >= min_pass
     raise typer.Exit(EXIT_OK if passed else EXIT_FAILED)
+
+
+@evals_app.command("prune")
+def evals_prune(
+    keep: Annotated[
+        int,
+        typer.Option("--keep", min=0, help="Newest eval runs per suite that keep their sandbox."),
+    ] = DEFAULT_EVAL_KEEP,
+) -> None:
+    """Remove the sandbox directories of all but the newest eval runs of each suite."""
+    settings = _settings()
+    with Store(settings.db_path) as store:
+        pruned = prune_eval_homes(store, settings, keep=keep)
+    console.print(render.pruned_view(pruned, keep))
 
 
 @app.command()

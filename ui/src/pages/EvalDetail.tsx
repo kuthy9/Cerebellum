@@ -4,7 +4,7 @@ import { ApiError, api } from "../api";
 import { Sparkline } from "../components/Sparkline";
 import { Empty, ErrorNote, Meta, PageHeader, Panel } from "../components/ui";
 import { useNow } from "../hooks/useNow";
-import { type CaseChange, caseChange, describeCheck } from "../lib/evals";
+import { type CaseChange, aiMode, caseChange, describeCheck, elapsed, isLive } from "../lib/evals";
 import { fmtCost, fmtDuration, fmtPercent } from "../lib/format";
 import { type Tone, toneColor } from "../lib/status";
 import type { EvalResult } from "../types";
@@ -58,7 +58,7 @@ export function EvalDetail() {
   const detail = useQuery({
     queryKey: ["evals", evalId],
     queryFn: () => api.evalRun(evalId),
-    refetchInterval: (query) => (query.state.data?.eval.status === "running" ? 1500 : false),
+    refetchInterval: (query) => (query.state.data && isLive(query.state.data.eval) ? 1500 : false),
   });
 
   if (detail.isLoading) return <Empty>loading…</Empty>;
@@ -93,7 +93,7 @@ export function EvalDetail() {
               <Link to={`/evals/${baseline.id}`} className="text-accent hover:underline">
                 {baseline.id}
               </Link>{" "}
-              {baseline.passed}/{baseline.total}
+              {baseline.passed}/{baseline.total} · {aiMode(baseline)}
             </>
           ) : (
             "first run"
@@ -103,11 +103,16 @@ export function EvalDetail() {
           <span style={{ color: run.regressions ? toneColor("fail") : undefined }}>{run.regressions}</span>
         </Meta>
         <Meta label="cost">{fmtCost(run.cost_usd) || "$0"}</Meta>
-        <Meta label="duration">{fmtDuration(run.duration_s ?? now - run.created_at)}</Meta>
+        <Meta label="duration">{fmtDuration(elapsed(run, now))}</Meta>
         <Meta label="ai first try">{run.ai_first_try ? `${run.ai_first_ok}/${run.ai_first_try}` : "—"}</Meta>
         <Meta label="repairs">{run.ai_repairs}</Meta>
-        <Meta label="ai">{run.mock ? "mock" : "claude"}</Meta>
+        <Meta label="ai">{aiMode(run)}</Meta>
       </div>
+      {run.status === "running" && run.stale && (
+        <div className="border-b border-line px-6 py-2 text-[12px] text-fail">
+          stale — the process running this eval stopped; the next eval of this suite records it as abandoned
+        </div>
+      )}
       {run.error && <div className="mono border-b border-line px-6 py-2 text-[12px] text-fail">{run.error}</div>}
       <div className="grid gap-6 p-6 xl:grid-cols-[minmax(0,3fr)_minmax(260px,1fr)]">
         <Panel title="Cases" actions={<span className="mono text-[11px] text-faint">{failing ? `${failing} failing` : "all passing"}</span>}>

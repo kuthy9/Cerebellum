@@ -1,8 +1,9 @@
 """Run an eval suite: one real run per case, decided and checked automatically, then compared
-with the previous completed run of the same suite."""
+with the previous completed run of the same suite and AI mode."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import secrets
@@ -62,7 +63,12 @@ class EvalRunner:
         on_result: Callable[[EvalCase, EvalResultRecord], None] | None = None,
     ) -> EvalRunRecord:
         suite = loaded.suite
-        baseline = self.store.latest_eval_run(suite.suite)
+        # An earlier eval of this suite whose process died never finished its row: record it.
+        for abandoned in self.store.abandon_stale_eval_runs(
+            suite.suite, timeout=self.settings.lease_seconds
+        ):
+            self._close_approvals(abandoned)
+        baseline = self.store.latest_eval_run(suite.suite, mock=self.provider.mock)
         previous = (
             {result.case_id: result.passed for result in self.store.get_eval_results(baseline.id)}
             if baseline
@@ -90,6 +96,7 @@ class EvalRunner:
             total=len(suite.cases),
             baseline_id=baseline.id if baseline else None,
         )
+        heartbeat = asyncio.create_task(self._heartbeat(eval_run_id))
         run_ids: list[str] = []
         try:
             for position, case in enumerate(suite.cases):
@@ -101,6 +108,7 @@ class EvalRunner:
                 if on_result is not None:
                     on_result(case, result)
         except BaseException as exc:  # interrupted or broken: never leave the eval "running"
+            self._close_approvals(eval_run_id)
             self.store.finish_eval_run(
                 eval_run_id,
                 status="errored",
@@ -112,9 +120,21 @@ class EvalRunner:
             if self.set_fail_mode is not None:
                 with contextlib.suppress(Exception):
                     await self.set_fail_mode("never")
+            heartbeat.cancel()
+            # A failed heartbeat write only weakens the liveness hint; it must not fail the eval.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await heartbeat
         return self.store.finish_eval_run(
             eval_run_id, status="completed", **self._ai_stats(run_ids)
         )
+
+    async def _heartbeat(self, eval_run_id: str) -> None:
+        """Keep the eval's heartbeat fresh while it runs; readers call an eval whose heartbeat
+        is older than the lease time stale (see Store.is_eval_stale)."""
+        interval = max(self.settings.lease_seconds / 3, 0.05)
+        while True:
+            await asyncio.sleep(interval)
+            self.store.eval_heartbeat(eval_run_id)
 
     async def _run_case(
         self,
@@ -197,6 +217,20 @@ class EvalRunner:
                 comment=comment,
             )
         return record
+
+    def _close_approvals(self, eval_run_id: str) -> None:
+        """An eval interrupted before deciding a case leaves its approval pending, and nobody
+        else may decide it (eval runs are records): reject it as `eval`, without resuming the
+        run, so it leaves the people's Approvals list."""
+        for approval in self.store.list_approvals(status="pending", eval_run_id=eval_run_id):
+            with contextlib.suppress(Exception):  # decided meanwhile: nothing left to close
+                self.store.decide_approval(
+                    approval.id,
+                    approved=False,
+                    by=EVAL_ACTOR,
+                    comment=f"eval {eval_run_id} was interrupted before deciding this case; "
+                    "closed without resuming the run",
+                )
 
     def _close_tasks(self, run_id: str, case_id: str) -> None:
         """Eval traffic must not land in the people's inbox: close the tasks a case opened."""
