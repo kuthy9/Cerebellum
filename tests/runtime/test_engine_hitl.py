@@ -110,6 +110,34 @@ async def test_approval_timeout_applies_on_timeout(store, settings, clock, tmp_p
     assert store.get_step(run.run_id, "sign_off").output["auto"] is True
 
 
+async def test_expiry_decides_every_overdue_approval_and_resumes_each_run_once(
+    store, settings, clock, tmp_path, monkeypatch
+):
+    text = """
+name: two_timed_gates
+steps:
+  - {id: gate_a, type: approval, title: A, timeout: 1h, on_timeout: approve}
+  - {id: gate_b, type: approval, title: B, timeout: 1h, on_timeout: approve}
+"""
+    engine = engine_for(store, settings)
+    run = await engine.start(wf(text, tmp_path))
+    assert run.status is RunStatus.WAITING_APPROVAL
+    clock.advance(3601)
+    resumed = []
+    real_resume = engine.resume
+
+    async def counting_resume(run_id):
+        resumed.append(run_id)
+        return await real_resume(run_id)
+
+    monkeypatch.setattr(engine, "resume", counting_resume)
+    assert await engine.expire_due_approvals() == [run.run_id]
+    assert resumed == [run.run_id]
+    assert store.get_run(run.run_id).status is RunStatus.SUCCEEDED
+    approvals = store.list_approvals(run_id=run.run_id)
+    assert [(a.status, a.decided_by) for a in approvals] == [("approved", "system")] * 2
+
+
 async def test_resume_applies_expiry_by_itself(store, settings, clock, tmp_path):
     engine = engine_for(store, settings)
     run = await engine.start(wf(APPROVAL_YAML, tmp_path), {"amount": 900})

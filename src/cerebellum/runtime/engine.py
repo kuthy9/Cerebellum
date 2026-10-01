@@ -180,7 +180,9 @@ class Engine:
     async def expire_due_approvals(self) -> list[str]:
         """Apply on_timeout to overdue approvals and resume their runs."""
         now = self.clock.now()
-        resumed: list[str] = []
+        # Decide them all before resuming anything: a resume would itself expire the run's other
+        # overdue approvals, and deciding those again afterwards fails.
+        due: dict[str, None] = {}  # run ids, in order, without duplicates
         for approval in self.store.list_approvals(status="pending"):
             if approval.expires_at is None or approval.expires_at > now:
                 continue
@@ -193,11 +195,12 @@ class Engine:
                 comment="approval timed out",
                 expired=True,
             )
-            if approval.run_id in resumed:
-                continue
+            due[approval.run_id] = None
+        resumed: list[str] = []
+        for run_id in due:
             try:
-                await self.resume(approval.run_id)
-                resumed.append(approval.run_id)
+                await self.resume(run_id)
+                resumed.append(run_id)
             except LeaseUnavailable:
                 pass
         return resumed
