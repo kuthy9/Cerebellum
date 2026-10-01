@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 from collections.abc import AsyncIterator, Callable, Collection, Mapping
 from pathlib import Path
@@ -38,6 +39,9 @@ from cerebellum.spec.durations import parse_duration
 STATIC_DIR = Path(__file__).parent / "static"
 # Names of this machine; a dashboard bound to one of them only answers requests addressed to them.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# index.html names the hashed /assets files of the current build, so browsers must revalidate it
+# (or a rebuilt UI would load the old assets); the hashed assets themselves may stay cached.
+INDEX_HEADERS = {"Cache-Control": "no-cache"}
 # How many runs of a suite the eval detail returns for its trend line.
 EVAL_HISTORY = 30
 UI_MISSING = """<!doctype html>
@@ -118,13 +122,15 @@ def create_app(
     provider: AIProvider,
     mode: str,
     workflows_dir: Path,
+    mock_requested: bool = False,
     store: Store | None = None,
     http_transports: Mapping[str, httpx.AsyncBaseTransport] | None = None,
     static_dir: Path = STATIC_DIR,
     allowed_hosts: Collection[str] | None = None,
 ) -> FastAPI:
     """Build the dashboard app. Without `store`, the app opens and closes its own. With
-    `allowed_hosts`, requests addressed to any other host name are refused."""
+    `allowed_hosts`, requests addressed to any other host name are refused. `mock_requested`
+    tells the UI the mock AI was asked for, so it does not suggest setting an API key."""
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -183,6 +189,7 @@ def create_app(
             "version": __version__,
             "mode": mode,
             "mock": provider.mock,
+            "mock_requested": mock_requested,
             "model": settings.model,
         }
 
@@ -202,7 +209,7 @@ def create_app(
     async def start_run(body: StartRun, request: Request):
         _, worker, catalog = parts(request)
         try:
-            entry = catalog.get(body.workflow)
+            entry = await asyncio.to_thread(catalog.get, body.workflow)
         except KeyError as exc:
             raise HTTPException(404, f"unknown workflow {body.workflow!r}") from exc
         record = worker.start_run(entry.workflow, body.input, body.params)
@@ -307,18 +314,22 @@ def create_app(
             "history": [js.eval_run_json(r) for r in history],
         }
 
+    # The catalog walks the --workflows tree and parses what changed: in a worker thread, so a
+    # large tree never stalls event streams or running steps.
     @app.get("/api/workflows")
     async def list_workflows(request: Request):
         _, _, catalog = parts(request)
-        return {"workflows": [js.workflow_summary(entry) for entry in catalog.entries()]}
+        entries = await asyncio.to_thread(catalog.entries)
+        return {"workflows": [js.workflow_summary(entry) for entry in entries]}
 
     @app.get("/api/workflows/{workflow_id:path}")
     async def workflow_detail(workflow_id: str, request: Request):
         _, _, catalog = parts(request)
         try:
-            return js.workflow_detail(catalog.get(workflow_id))
+            entry = await asyncio.to_thread(catalog.get, workflow_id)
         except KeyError as exc:
             raise HTTPException(404, f"unknown workflow {workflow_id!r}") from exc
+        return js.workflow_detail(entry)
 
     @app.get("/api/stream")
     async def stream(request: Request, after: int | None = None) -> StreamingResponse:
@@ -350,12 +361,16 @@ def create_app(
         if path == "api" or path.startswith("api/"):
             raise HTTPException(404, "not found")
         root = static_dir.resolve()
-        candidate = (root / path).resolve()
-        if path and candidate.is_file() and root in candidate.parents:
-            return FileResponse(candidate)
         index = root / "index.html"
+        try:
+            candidate = (root / path).resolve()
+        except ValueError:
+            candidate = None  # a name no file can have, e.g. one with a NUL byte
+        found = path and candidate and candidate.is_file() and root in candidate.parents
+        if found and candidate != index:
+            return FileResponse(candidate)
         if index.is_file():
-            return FileResponse(index)
+            return FileResponse(index, headers=INDEX_HEADERS)
         return HTMLResponse(UI_MISSING)
 
     return app

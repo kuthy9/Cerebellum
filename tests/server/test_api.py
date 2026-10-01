@@ -10,6 +10,7 @@ from cerebellum.ai.mock import MockProvider
 from cerebellum.runtime.engine import Engine
 from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments_app
 from cerebellum.server.app import create_app
+from cerebellum.server.catalog import Catalog
 from cerebellum.spec import parse_workflow
 from cerebellum.templates import template_path
 
@@ -32,6 +33,7 @@ def client(store, settings, payments):
         settings,
         provider=MockProvider(latency=(0, 0)),
         mode="mock AI (requested)",
+        mock_requested=True,
         workflows_dir=template_path("refund"),
         store=store,
         http_transports={"payments": httpx.ASGITransport(app=create_payments_app(payments))},
@@ -100,7 +102,21 @@ def test_a_mock_dashboard_refuses_to_continue_a_claude_run(client, store, settin
 def test_info_reports_mock_mode(client):
     info = client.get("/api/info").json()
     assert info["mock"] is True and info["mode"] == "mock AI (requested)"
+    assert info["mock_requested"] is True
     assert info["version"] == "0.2.0"
+
+
+def test_info_tells_a_mock_fallback_from_a_requested_mock(store, settings, tmp_path):
+    app = create_app(
+        settings,
+        provider=MockProvider(latency=(0, 0)),
+        mode="mock AI (no Anthropic credentials found)",
+        workflows_dir=tmp_path,
+        store=store,
+    )
+    with TestClient(app) as c:
+        info = c.get("/api/info").json()
+    assert info["mock"] is True and info["mock_requested"] is False
 
 
 def test_small_refund_runs_in_the_background(client, store):
@@ -206,6 +222,25 @@ def test_metrics_and_workflows(client, store):
     assert client.get("/api/workflows/missing.yaml").status_code == 404
 
 
+def test_the_workflow_catalog_is_scanned_off_the_event_loop(client, store, monkeypatch):
+    scanned_on = []
+    real_entries = Catalog.entries
+
+    def entries(self):
+        try:
+            asyncio.get_running_loop()
+            scanned_on.append("event loop")
+        except RuntimeError:
+            scanned_on.append("thread")
+        return real_entries(self)
+
+    monkeypatch.setattr(Catalog, "entries", entries)
+    assert client.get("/api/workflows").status_code == 200
+    assert client.get(f"/api/workflows/{WORKFLOW_ID}").status_code == 200
+    settled(store, start(client, "small"), "succeeded")
+    assert scanned_on == ["thread", "thread", "thread"]
+
+
 def make_static(tmp_path):
     static = tmp_path / "static"
     (static / "assets").mkdir(parents=True)
@@ -235,6 +270,19 @@ def test_serves_the_ui_with_an_spa_fallback(store, settings, tmp_path):
         assert c.get("/favicon.svg").text == "<svg/>"
         assert "secret" not in c.get("/..%2fsecret.txt").text
         assert c.get("/api/nope").status_code == 404
+
+
+def test_the_index_is_revalidated_so_a_rebuilt_ui_is_picked_up(store, settings, tmp_path):
+    with TestClient(app_with(store, settings, tmp_path, make_static(tmp_path))) as c:
+        for path in ("/", "/index.html", "/runs/r_12345678"):
+            assert c.get(path).headers.get("cache-control") == "no-cache", path
+
+
+def test_paths_the_filesystem_rejects_fall_back_to_the_ui(store, settings, tmp_path):
+    app = app_with(store, settings, tmp_path, make_static(tmp_path))
+    with TestClient(app, raise_server_exceptions=False) as c:
+        page = c.get("/%00")  # a NUL byte: no file can have that name
+        assert page.status_code == 200 and "<title>ui</title>" in page.text
 
 
 def test_explains_how_to_build_a_missing_ui(store, settings, tmp_path):

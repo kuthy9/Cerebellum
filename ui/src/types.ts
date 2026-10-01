@@ -7,6 +7,8 @@ export interface Info {
   version: string;
   mode: string;
   mock: boolean;
+  /** The mock AI was asked for (--mock / CEREBELLUM_MOCK) rather than a missing-key fallback. */
+  mock_requested: boolean;
   model: string;
 }
 

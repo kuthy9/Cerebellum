@@ -1,23 +1,10 @@
-import { useState } from "react";
+import { useSyncExternalStore } from "react";
+import { createNameStore } from "../lib/approver";
 
-const KEY = "cerebellum.approver";
+const approver = createNameStore(() => window.localStorage);
 
-/** The name recorded with decisions and task resolutions, remembered in this browser. */
+/** The name recorded with decisions and task resolutions: one name shared by every form in the
+ *  dashboard, remembered in this browser. */
 export function useApprover(): [string, (name: string) => void] {
-  const [name, setName] = useState(() => {
-    try {
-      return window.localStorage.getItem(KEY) ?? "";
-    } catch {
-      return "";
-    }
-  });
-  const update = (value: string) => {
-    setName(value);
-    try {
-      window.localStorage.setItem(KEY, value);
-    } catch {
-      // storage unavailable (private mode); the name just isn't remembered
-    }
-  };
-  return [name, update];
+  return [useSyncExternalStore(approver.subscribe, approver.get), approver.set];
 }

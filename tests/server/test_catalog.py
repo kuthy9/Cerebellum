@@ -1,8 +1,10 @@
 import json
+import os
 import shutil
 
 import pytest
 
+from cerebellum.server import catalog as catalog_module
 from cerebellum.server.catalog import Catalog
 from cerebellum.server.serialize import graph_json, workflow_detail, workflow_summary
 from cerebellum.spec import load_workflow, parse_workflow
@@ -21,6 +23,13 @@ def write(path, text):
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
     return path
+
+
+def rewrite(path, text):
+    """Change a file and move its mtime on, even on file systems with coarse timestamps."""
+    before = path.stat().st_mtime_ns
+    write(path, text)
+    os.utime(path, ns=(before + 2_000_000_000, before + 2_000_000_000))
 
 
 def test_scan_skips_non_workflows_hidden_dirs_and_deep_files(store, tmp_path):
@@ -75,6 +84,54 @@ steps:
         parse_workflow(needs_env, base_dir=tmp_path, env={"SOME_UNSET_BASE_URL": "http://x"})
     )
     assert Catalog(store, tmp_path / "empty").entries() == []
+
+
+def test_new_changed_and_deleted_files_are_picked_up(store, tmp_path):
+    root = tmp_path / "project"
+    tiny = write(root / "tiny" / "workflow.yaml", FLOW)
+    sample = write(root / "tiny" / "inputs" / "alice.json", json.dumps({"who": "alice"}))
+    catalog = Catalog(store, root)
+    assert [e.workflow.description for e in catalog.entries()] == ["A tiny flow"]
+
+    rewrite(tiny, FLOW.replace("A tiny flow", "A changed flow"))
+    rewrite(sample, json.dumps({"who": "alice smith"}))
+    write(root / "tiny" / "inputs" / "bob.json", json.dumps({"who": "bob"}))
+    write(root / "other.yaml", FLOW.replace("tiny", "other"))
+    entries = {e.id: e for e in catalog.entries()}
+    assert sorted(entries) == ["other.yaml", "tiny/workflow.yaml"]
+    changed = entries["tiny/workflow.yaml"]
+    assert changed.workflow.description == "A changed flow"
+    assert changed.samples == {"alice": {"who": "alice smith"}, "bob": {"who": "bob"}}
+
+    tiny.unlink()
+    assert [e.id for e in catalog.entries()] == ["other.yaml"]
+
+
+def test_unchanged_files_are_not_parsed_again(store, tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    write(root / "tiny.yaml", FLOW)
+    write(root / "notes.yaml", "just: notes\n")  # not a workflow: its failure is remembered too
+    on_disk = load_workflow(write(tmp_path / "gone" / "old.yaml", FLOW.replace("tiny", "old")))
+    store.save_workflow(on_disk)  # a history snapshot whose file is not under the root
+    loads, parses = [], []
+
+    def counting_load(path, **kwargs):
+        loads.append(path)
+        return load_workflow(path, **kwargs)
+
+    def counting_parse(text, **kwargs):
+        parses.append(text)
+        return parse_workflow(text, **kwargs)
+
+    monkeypatch.setattr(catalog_module, "load_workflow", counting_load)
+    monkeypatch.setattr(catalog_module, "parse_workflow", counting_parse)
+    catalog = Catalog(store, root)
+    first = catalog.entries()
+    second = catalog.entries()
+
+    assert sorted(e.id for e in second) == sorted([on_disk.digest, "tiny.yaml"])
+    assert [e.workflow for e in second] == [e.workflow for e in first]
+    assert len(loads) == 2 and len(parses) == 1
 
 
 def test_get_and_serialisation(store, tmp_path):

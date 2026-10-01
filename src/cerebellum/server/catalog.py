@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+import threading
 from collections.abc import Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -31,20 +32,44 @@ class WorkflowEntry:
 
 
 class Catalog:
+    """Every scan walks the tree again, but a file is only parsed again once its mtime or size
+    changes, and a snapshot (immutable per digest) only once. Scans may run in worker threads."""
+
     def __init__(self, store: Store, root: Path, *, depth: int = DEFAULT_SCAN_DEPTH) -> None:
         self.store = store
         self.root = Path(root).resolve()
         self.depth = depth
+        self._lock = threading.Lock()
+        # path → ((mtime_ns, size), workflow or None when the file is not a workflow)
+        self._files: dict[Path, tuple[tuple[int, int], Workflow | None]] = {}
+        self._snapshots: dict[str, Workflow | None] = {}
 
     def entries(self) -> list[WorkflowEntry]:
+        with self._lock:
+            return self._scan()
+
+    def _scan(self) -> list[WorkflowEntry]:
         snapshots = {snap.digest: snap for snap in self.store.list_workflows()}
         entries: list[WorkflowEntry] = []
         on_disk: set[str] = set()
+        files: dict[Path, tuple[tuple[int, int], Workflow | None]] = {}
         for path in self._yaml_files():
             try:
-                workflow = load_workflow(path)
-            except (SpecError, OSError, UnicodeDecodeError):
-                continue  # not a workflow (compose files, eval suites, ...) or unreadable
+                stat = path.stat()
+            except OSError:
+                continue  # removed while the tree was being walked
+            stamp = (stat.st_mtime_ns, stat.st_size)
+            cached = self._files.get(path)
+            if cached is not None and cached[0] == stamp:
+                workflow = cached[1]
+            else:
+                try:
+                    workflow = load_workflow(path)
+                except (SpecError, OSError, UnicodeDecodeError):
+                    workflow = None  # not a workflow (compose files, eval suites...) or unreadable
+            files[path] = (stamp, workflow)
+            if workflow is None:
+                continue
             snap = snapshots.get(workflow.digest)
             on_disk.add(workflow.digest)
             entries.append(
@@ -58,13 +83,19 @@ class Catalog:
                     last_run_at=snap.last_run_at if snap else None,
                 )
             )
+        self._files = files  # files that are gone drop out of the cache
         for digest, snap in snapshots.items():
             if digest in on_disk:
                 continue
-            try:
-                workflow = parse_workflow(snap.source_yaml, base_dir=snap.base_dir)
-            except SpecError:
-                continue  # e.g. a ${VAR} it needs is not set in this environment
+            if digest not in self._snapshots:
+                try:
+                    parsed = parse_workflow(snap.source_yaml, base_dir=snap.base_dir)
+                except SpecError:
+                    parsed = None  # e.g. a ${VAR} it needs is not set in this environment
+                self._snapshots[digest] = parsed
+            workflow = self._snapshots[digest]
+            if workflow is None:
+                continue
             entries.append(
                 WorkflowEntry(
                     id=digest,
