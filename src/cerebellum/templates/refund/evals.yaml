@@ -1,0 +1,132 @@
+suite: refund_regression
+description: >
+  Pins the refund workflow's decisions: automatic refunds, the approval threshold, human
+  approvals and rejections, retries, the manual fallback, AI denials and the policy rules.
+  Every eval run starts from fresh sandbox data; cases run in order.
+workflow: workflow.yaml
+defaults:
+  approval: approved
+  sandbox: never
+
+cases:
+  - id: small_refund_is_automatic
+    input: {order_id: A1001, amount: 120, reason: The jacket arrived with a torn sleeve.}
+    expect:
+      status: succeeded
+      output.decision: refunded
+      steps.manager_approval.status: skipped
+      tasks.count: 0
+    assert:
+      - "output.refund_id"
+
+  - id: large_refund_approved_by_a_human
+    input: {order_id: A1002, amount: 899, reason: The laptop screen flickers constantly.}
+    approval: approved
+    expect:
+      status: succeeded
+      output.decision: refunded
+      steps.manager_approval.status: succeeded
+      steps.manager_approval.output.by: eval
+      steps.assess_request.output.risk: medium
+
+  - id: large_refund_rejected_by_a_human
+    input: {order_id: A1008, amount: 640, reason: Changed my mind about the colour.}
+    approval: rejected
+    expect:
+      status: rejected
+      output.decision: rejected
+      steps.issue_refund.status: cancelled
+
+  - id: amount_at_threshold_needs_no_approval
+    input: {order_id: A1010, amount: 499, reason: Arrived scratched.}
+    expect:
+      status: succeeded
+      steps.manager_approval.status: skipped
+      approvals.count: 0
+
+  - id: amount_above_threshold_needs_approval
+    input: {order_id: A1011, amount: 501, reason: Arrived scratched.}
+    expect:
+      status: succeeded
+      steps.manager_approval.status: succeeded
+      approvals.count: 1
+
+  - id: flaky_payments_api_is_retried
+    input: {order_id: A1009, amount: 89.9, reason: Wrong size.}
+    sandbox: "first:2"
+    expect:
+      status: succeeded
+      output.decision: refunded
+      steps.issue_refund.attempts: 3
+
+  - id: payments_outage_opens_a_manual_case
+    input: {order_id: A1005, amount: 75, reason: The package arrived empty.}
+    sandbox: always
+    expect:
+      status: needs_attention
+      output.decision: manual
+      steps.issue_refund.status: recovered
+      steps.open_manual_case.status: succeeded
+      tasks.count: 1
+
+  - id: chargeback_threat_is_denied
+    input:
+      order_id: A1003
+      amount: 60
+      reason: Tracking says delivered but I never got it. Refund now or I will file a chargeback.
+    expect:
+      status: succeeded
+      output.decision: denied
+      steps.assess_request.output.risk: high
+      steps.issue_refund.status: skipped
+
+  - id: partial_refund_is_allowed
+    input: {order_id: A1004, amount: 20, reason: One of the two items was missing.}
+    expect:
+      status: succeeded
+      output.decision: refunded
+
+  - id: undelivered_order_is_refused
+    input: {order_id: A1006, amount: 100, reason: Not here yet.}
+    expect:
+      status: failed
+      steps.policy_check.status: failed
+    assert:
+      - "'Only delivered orders can be refunded' in error"
+
+  - id: already_refunded_order_is_refused
+    input: {order_id: A1007, amount: 50, reason: Please refund again.}
+    expect:
+      status: failed
+    assert:
+      - "'already been refunded' in error"
+
+  - id: amount_above_order_total_is_refused
+    input: {order_id: A1012, amount: 100, reason: Compensation for the delay.}
+    expect:
+      status: failed
+      steps.assess_request.status: cancelled
+    assert:
+      - "'must be positive and not exceed' in error"
+
+  - id: zero_amount_is_refused
+    input: {order_id: A1012, amount: 0, reason: Testing.}
+    expect:
+      status: failed
+      steps.policy_check.status: failed
+
+  - id: unknown_order_fails_fast
+    input: {order_id: Z9999, amount: 10, reason: "Where is my parcel?"}
+    expect:
+      status: failed
+      steps.fetch_order.status: failed
+      steps.fetch_order.attempts: 1
+
+  - id: second_refund_of_the_same_order_is_refused
+    description: Runs after small_refund_is_automatic refunded A1001 in the same eval run.
+    input: {order_id: A1001, amount: 120, reason: The jacket arrived with a torn sleeve.}
+    expect:
+      status: failed
+      steps.issue_refund.status: cancelled
+    assert:
+      - "'already been refunded' in error"

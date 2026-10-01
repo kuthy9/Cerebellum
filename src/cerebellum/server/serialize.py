@@ -1,0 +1,129 @@
+"""JSON shapes returned by the dashboard API."""
+
+from __future__ import annotations
+
+import dataclasses
+from typing import TYPE_CHECKING, Any
+
+from cerebellum.runtime.store import (
+    ApprovalRecord,
+    EvalResultRecord,
+    EvalRunRecord,
+    EventRecord,
+    RunRecord,
+    StepRecord,
+    TaskRecord,
+)
+from cerebellum.runtime.trace import Span
+from cerebellum.spec.models import Workflow
+
+if TYPE_CHECKING:
+    from cerebellum.server.catalog import WorkflowEntry
+
+
+def run_json(run: RunRecord, *, stale: bool = False) -> dict[str, Any]:
+    data = dataclasses.asdict(run)
+    data["status"] = run.status.value
+    data["stale"] = stale
+    data["duration_s"] = None if run.ended_at is None else run.ended_at - run.created_at
+    return data
+
+
+def step_json(record: StepRecord) -> dict[str, Any]:
+    data = dataclasses.asdict(record)
+    data["status"] = record.status.value
+    data["duration_s"] = record.duration
+    return data
+
+
+def _with_run(data: dict[str, Any], run: RunRecord | None) -> dict[str, Any]:
+    if run is not None:
+        data["workflow_name"] = run.workflow_name
+        data["run_status"] = run.status.value
+    return data
+
+
+def approval_json(approval: ApprovalRecord, run: RunRecord | None = None) -> dict[str, Any]:
+    return _with_run(dataclasses.asdict(approval), run)
+
+
+def task_json(task: TaskRecord, run: RunRecord | None = None) -> dict[str, Any]:
+    return _with_run(dataclasses.asdict(task), run)
+
+
+def event_json(event: EventRecord) -> dict[str, Any]:
+    return dataclasses.asdict(event)
+
+
+def span_json(span: Span) -> dict[str, Any]:
+    return dataclasses.asdict(span)
+
+
+def eval_run_json(record: EvalRunRecord) -> dict[str, Any]:
+    data = dataclasses.asdict(record)
+    data["pass_rate"] = record.pass_rate
+    data["duration_s"] = None if record.ended_at is None else record.ended_at - record.created_at
+    data["ai_first_pass_rate"] = (
+        record.ai_first_ok / record.ai_first_try if record.ai_first_try else None
+    )
+    return data
+
+
+def eval_result_json(result: EvalResultRecord) -> dict[str, Any]:
+    data = dataclasses.asdict(result)
+    data["regression"] = result.regression
+    return data
+
+
+def graph_json(workflow: Workflow) -> dict[str, Any]:
+    users = {s.on_failure.fallback: s.id for s in workflow.steps if s.on_failure}
+    return {
+        "steps": [
+            {
+                "id": step.id,
+                "type": step.type,
+                "description": step.description,
+                "needs": list(step.needs),
+                "when": step.when,
+                "fallback": step.on_failure.fallback if step.on_failure else None,
+            }
+            for step in workflow.steps
+        ],
+        "fallbacks": [
+            {
+                "id": step.id,
+                "type": step.type,
+                "description": step.description,
+                "fallback_for": users.get(step.id),
+            }
+            for step in workflow.fallbacks
+        ],
+    }
+
+
+def workflow_summary(entry: WorkflowEntry) -> dict[str, Any]:
+    wf = entry.workflow
+    return {
+        "id": entry.id,
+        "name": wf.name,
+        "version": wf.version,
+        "description": wf.description,
+        "source": entry.source,
+        "path": entry.path,
+        "digest": wf.digest,
+        "steps": len(wf.steps),
+        "runs": entry.runs,
+        "last_run_at": entry.last_run_at,
+    }
+
+
+def workflow_detail(entry: WorkflowEntry) -> dict[str, Any]:
+    wf = entry.workflow
+    return {
+        **workflow_summary(entry),
+        "yaml": wf.source_yaml,
+        "graph": graph_json(wf),
+        "params": wf.params,
+        "input": {name: field.model_dump() for name, field in wf.input.items()},
+        "samples": entry.samples,
+    }

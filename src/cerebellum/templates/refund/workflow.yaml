@@ -1,0 +1,144 @@
+name: refund_request
+version: 1
+description: >
+  A customer asks for a refund. Look the order up in PostgreSQL, check eligibility with
+  deterministic policy rules and an AI assessment, ask a human when the refund is large or
+  risky, call the payments API, and open a manual case if the API keeps failing.
+
+params:
+  approval_threshold: 500
+
+input:
+  order_id: {type: string, required: true, description: Order identifier}
+  amount: {type: number, required: true, description: Requested refund amount}
+  reason: {type: string, description: The customer's reason for the refund}
+
+connectors:
+  orders_db:
+    type: postgres
+    dsn: "${ORDERS_DSN:-sandbox}"
+    seed: seed.sql
+  payments:
+    type: rest
+    base_url: "${PAYMENTS_URL:-http://127.0.0.1:8787}"
+    headers:
+      Authorization: "Bearer ${PAYMENTS_TOKEN:-sandbox-token}"
+    timeout: 5s
+
+limits:
+  budget_usd: 0.50
+
+steps:
+  - id: fetch_order
+    type: query
+    description: Load the order from PostgreSQL
+    connector: orders_db
+    sql: >
+      SELECT id, customer_email, amount, currency, status, delivered_at, refund_status
+      FROM orders WHERE id = :order_id
+    params:
+      order_id: "{{ input.order_id }}"
+    expect: one
+    retry: {max: 2, base: 200ms}
+
+  - id: policy_check
+    type: validate
+    description: Deterministic refund policy
+    needs: [fetch_order]
+    rules:
+      - expr: "input.amount > 0 and input.amount <= steps.fetch_order.output.amount"
+        message: Refund amount must be positive and not exceed the order amount
+      - expr: "steps.fetch_order.output.status == 'delivered'"
+        message: Only delivered orders can be refunded
+      - expr: "steps.fetch_order.output.refund_status == 'none'"
+        message: Order has already been refunded
+
+  - id: assess_request
+    type: ai
+    description: Structured AI eligibility and risk assessment
+    needs: [policy_check]
+    system: You are a meticulous refund analyst. Answer only with the requested JSON.
+    prompt: |
+      Assess this refund request against the policy:
+      - Delivered orders may be refunded within 30 days of delivery.
+      - Reasons that contradict delivery records, threaten chargebacks, or look like abuse are
+        high risk and not eligible.
+
+      Order: {{ steps.fetch_order.output }}
+      Requested amount: {{ input.amount }}
+      Customer reason: {{ input.reason | default("(none given)", true) }}
+    output_schema:
+      type: object
+      required: [eligible, risk, rationale]
+      properties:
+        eligible: {type: boolean}
+        risk: {type: string, enum: [low, medium, high]}
+        rationale: {type: string}
+    effort: low
+    retry: {max: 2, base: 1s}
+    mock:
+      - when: "'fraud' in (input.reason or '') | lower or 'chargeback' in (input.reason or '') | lower"
+        output: {eligible: false, risk: high, rationale: "The reason contradicts the delivery record and threatens a chargeback."}
+      - when: "input.amount > params.approval_threshold"
+        output: {eligible: true, risk: medium, rationale: "Within policy, but the amount is large."}
+      - output: {eligible: true, risk: low, rationale: "Delivered recently and the reason is plausible."}
+
+  - id: manager_approval
+    type: approval
+    description: Human approval for large or risky refunds
+    needs: [assess_request]
+    when: >
+      steps.assess_request.output.eligible and
+      (input.amount > params.approval_threshold or steps.assess_request.output.risk == 'high')
+    title: "Refund {{ input.amount }} for order {{ input.order_id }}"
+    show: [fetch_order, assess_request]
+    timeout: 24h
+    on_timeout: reject
+
+  - id: issue_refund
+    type: http
+    description: Call the payments API (idempotent, retried)
+    needs: [manager_approval]
+    when: "steps.assess_request.output.eligible"
+    connector: payments
+    method: POST
+    path: /refunds
+    body:
+      order_id: "{{ input.order_id }}"
+      amount: "{{ input.amount }}"
+      currency: "{{ steps.fetch_order.output.currency }}"
+      reason: "{{ input.reason | default('', true) }}"
+    retry: {max: 3, backoff: exponential, base: 500ms}
+    on_failure: {fallback: open_manual_case}
+
+  - id: mark_refunded
+    type: query
+    description: Record the refund on the order
+    needs: [issue_refund]
+    when: "steps.issue_refund.status == 'succeeded'"
+    connector: orders_db
+    sql: UPDATE orders SET refund_status = 'refunded', refund_id = :refund_id WHERE id = :order_id
+    params:
+      refund_id: "{{ steps.issue_refund.output.body.id }}"
+      order_id: "{{ input.order_id }}"
+
+fallbacks:
+  - id: open_manual_case
+    type: task
+    title: "Refund for {{ input.order_id }} needs manual processing"
+    assignee: finance-ops
+    payload:
+      order_id: "{{ input.order_id }}"
+      amount: "{{ input.amount }}"
+      failed_step: "{{ failure.step }}"
+      error: "{{ failure.error }}"
+
+output:
+  decision: >-
+    {{ 'refunded' if steps.issue_refund.status == 'succeeded'
+       else 'manual' if steps.issue_refund.status == 'recovered'
+       else 'rejected' if steps.manager_approval.status == 'failed'
+       else 'denied' if steps.assess_request.output.eligible == false
+       else 'failed' }}
+  refund_id: "{{ steps.issue_refund.output.body.id }}"
+  rationale: "{{ steps.assess_request.output.rationale }}"

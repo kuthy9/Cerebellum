@@ -1,0 +1,207 @@
+import json
+import time
+
+import httpx
+import pytest
+from fastapi.testclient import TestClient
+
+from cerebellum.ai.mock import MockProvider
+from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments_app
+from cerebellum.server.app import create_app
+from cerebellum.templates import template_path
+
+WORKFLOW_ID = "workflow.yaml"  # the packaged refund template, scanned from its own directory
+
+
+def sample(name):
+    path = template_path("refund") / "inputs" / f"{name}.json"
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+@pytest.fixture
+def payments():
+    return PaymentsState()
+
+
+@pytest.fixture
+def client(store, settings, payments):
+    app = create_app(
+        settings,
+        provider=MockProvider(latency=(0, 0)),
+        mode="mock AI (requested)",
+        workflows_dir=template_path("refund"),
+        store=store,
+        http_transports={"payments": httpx.ASGITransport(app=create_payments_app(payments))},
+    )
+    with TestClient(app) as test_client:
+        yield test_client
+
+
+def eventually(check, timeout=10.0):
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if check():
+            return
+        time.sleep(0.02)
+    raise AssertionError("condition not reached in time")
+
+
+def settled(store, run_id, status):
+    def check():
+        run = store.get_run(run_id)
+        return run.status.value == status and run.lease_owner is None
+
+    eventually(check)
+    return store.get_run(run_id)
+
+
+def start(client, name):
+    response = client.post("/api/runs", json={"workflow": WORKFLOW_ID, "input": sample(name)})
+    assert response.status_code == 201, response.text
+    return response.json()["run"]["run_id"]
+
+
+def test_info_reports_mock_mode(client):
+    info = client.get("/api/info").json()
+    assert info["mock"] is True and info["mode"] == "mock AI (requested)"
+    assert info["version"] == "0.2.0"
+
+
+def test_small_refund_runs_in_the_background(client, store):
+    run_id = start(client, "small")
+    settled(store, run_id, "succeeded")
+    [listed] = client.get("/api/runs").json()["runs"]
+    assert listed["run_id"] == run_id and listed["status"] == "succeeded"
+    assert listed["stale"] is False and listed["duration_s"] is not None
+    detail = client.get(f"/api/runs/{run_id}").json()
+    assert detail["run"]["output"]["decision"] == "refunded"
+    assert [s["step_id"] for s in detail["steps"]][:2] == ["fetch_order", "policy_check"]
+    assert len(detail["steps"]) == 7
+    assert detail["graph"]["steps"][-1]["id"] == "mark_refunded"
+    assert any(span["label"] == "POST /refunds → 201" for span in detail["spans"])
+    events = client.get(f"/api/runs/{run_id}/events").json()["events"]
+    assert events[0]["type"] == "run.started"
+    later = client.get(f"/api/runs/{run_id}/events", params={"after": events[-2]["seq"]})
+    assert [e["seq"] for e in later.json()["events"]] == [events[-1]["seq"]]
+
+
+def test_approval_flow_over_the_api(client, store):
+    run_id = start(client, "large")
+    settled(store, run_id, "waiting_approval")
+    [approval] = client.get("/api/approvals").json()["approvals"]
+    assert approval["run_id"] == run_id and approval["workflow_name"] == "refund_request"
+    assert approval["context"]["input"]["amount"] == 899
+    url = f"/api/approvals/{approval['id']}/decision"
+    decided = client.post(url, json={"approved": True, "by": "  dana ", "comment": "fine"})
+    assert decided.status_code == 200, decided.text
+    assert decided.json()["approval"]["decided_by"] == "dana"
+    again = client.post(url, json={"approved": False, "by": "erin"})
+    assert again.status_code == 409 and "already approved" in again.json()["detail"]
+    settled(store, run_id, "succeeded")
+    assert client.get("/api/approvals").json()["approvals"] == []
+    [decided_one] = client.get("/api/approvals", params={"status": "all"}).json()["approvals"]
+    assert decided_one["status"] == "approved"
+
+
+def test_decisions_need_a_name_and_an_existing_approval(client, store):
+    run_id = start(client, "large")
+    settled(store, run_id, "waiting_approval")
+    [approval] = client.get("/api/approvals").json()["approvals"]
+    url = f"/api/approvals/{approval['id']}/decision"
+    assert client.post(url, json={"approved": True, "by": "   "}).status_code == 422
+    missing = client.post("/api/approvals/ap_missing/decision", json={"approved": True, "by": "x"})
+    assert missing.status_code == 404
+
+
+def test_outage_opens_a_task_that_can_be_resolved(client, store, payments):
+    payments.set_fail_mode(FailMode.parse("always"))
+    run_id = start(client, "outage")
+    settled(store, run_id, "needs_attention")
+    [task] = client.get("/api/tasks").json()["tasks"]
+    assert task["assignee"] == "finance-ops" and task["workflow_name"] == "refund_request"
+    url = f"/api/tasks/{task['id']}/resolve"
+    resolved = client.post(url, json={"by": "ops", "note": "paid by hand"})
+    assert resolved.status_code == 200 and resolved.json()["task"]["status"] == "resolved"
+    assert client.get("/api/tasks").json()["tasks"] == []
+    assert len(client.get("/api/tasks", params={"status": "all"}).json()["tasks"]) == 1
+    assert client.post(url, json={"by": "ops"}).status_code == 409
+    assert client.post("/api/tasks/tk_missing/resolve", json={"by": "ops"}).status_code == 404
+
+
+def test_bad_requests_are_explained(client):
+    body = {"workflow": WORKFLOW_ID, "input": {"order_id": "A1001", "amount": "120"}}
+    bad = client.post("/api/runs", json=body)
+    assert bad.status_code == 400
+    assert any(issue["path"] == "input.amount" for issue in bad.json()["detail"]["issues"])
+    assert client.post("/api/runs", json={"workflow": "nope.yaml"}).status_code == 404
+    assert client.get("/api/runs/r_00000000").status_code == 404
+    assert client.get("/api/runs", params={"status": "bogus"}).status_code == 400
+    assert client.get("/api/metrics", params={"window": "soon"}).status_code == 400
+    assert client.get("/api/approvals", params={"status": "maybe"}).status_code == 400
+    assert client.get("/api/tasks", params={"status": "maybe"}).status_code == 400
+    assert client.get("/api/does-not-exist").status_code == 404
+
+
+def test_resume_over_the_api(client, store):
+    done = start(client, "small")
+    settled(store, done, "succeeded")
+    assert client.post(f"/api/runs/{done}/resume").status_code == 409
+    body = {"workflow": WORKFLOW_ID, "input": {"order_id": "ZZZ", "amount": 10}}
+    failed = client.post("/api/runs", json=body).json()["run"]["run_id"]
+    settled(store, failed, "failed")
+    assert client.post(f"/api/runs/{failed}/resume").status_code == 202
+    eventually(lambda: store.get_step(failed, "fetch_order").attempts == 2)
+    settled(store, failed, "failed")
+
+
+def test_metrics_and_workflows(client, store):
+    run_id = start(client, "small")
+    settled(store, run_id, "succeeded")
+    metrics = client.get("/api/metrics").json()
+    assert metrics["runs"] == 1 and metrics["success_rate"] == 1.0
+    assert metrics["window"] == "24h"
+    [workflow] = client.get("/api/workflows").json()["workflows"]
+    assert workflow["id"] == WORKFLOW_ID and workflow["source"] == "file"
+    assert workflow["runs"] == 1 and workflow["name"] == "refund_request"
+    detail = client.get(f"/api/workflows/{WORKFLOW_ID}").json()
+    assert set(detail["samples"]) == {"small", "large", "flaky", "outage", "fraud"}
+    assert detail["yaml"].startswith("name: refund_request")
+    assert detail["params"] == {"approval_threshold": 500}
+    assert client.get("/api/workflows/missing.yaml").status_code == 404
+
+
+def make_static(tmp_path):
+    static = tmp_path / "static"
+    (static / "assets").mkdir(parents=True)
+    (static / "index.html").write_text("<!doctype html><title>ui</title>", encoding="utf-8")
+    (static / "assets" / "app.js").write_text("console.log(1)", encoding="utf-8")
+    (static / "favicon.svg").write_text("<svg/>", encoding="utf-8")
+    (tmp_path / "secret.txt").write_text("secret", encoding="utf-8")
+    return static
+
+
+def app_with(store, settings, tmp_path, static_dir):
+    return create_app(
+        settings,
+        provider=MockProvider(latency=(0, 0)),
+        mode="mock AI (requested)",
+        workflows_dir=tmp_path,
+        store=store,
+        static_dir=static_dir,
+    )
+
+
+def test_serves_the_ui_with_an_spa_fallback(store, settings, tmp_path):
+    with TestClient(app_with(store, settings, tmp_path, make_static(tmp_path))) as c:
+        assert "<title>ui</title>" in c.get("/").text
+        assert "<title>ui</title>" in c.get("/runs/r_12345678").text
+        assert c.get("/assets/app.js").text == "console.log(1)"
+        assert c.get("/favicon.svg").text == "<svg/>"
+        assert "secret" not in c.get("/..%2fsecret.txt").text
+        assert c.get("/api/nope").status_code == 404
+
+
+def test_explains_how_to_build_a_missing_ui(store, settings, tmp_path):
+    with TestClient(app_with(store, settings, tmp_path, tmp_path / "not-built")) as c:
+        page = c.get("/")
+        assert page.status_code == 200 and "make ui" in page.text

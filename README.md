@@ -1,191 +1,248 @@
 <div align="center">
 
-```
-  ██████╗███████╗██████╗ ███████╗██████╗ ███████╗██╗     ██╗     ██╗   ██╗███╗   ███╗
- ██╔════╝██╔════╝██╔══██╗██╔════╝██╔══██╗██╔════╝██║     ██║     ██║   ██║████╗ ████║
- ██║     █████╗  ██████╔╝█████╗  ██████╔╝█████╗  ██║     ██║     ██║   ██║██╔████╔██║
- ██║     ██╔══╝  ██╔══██╗██╔══╝  ██╔══██╗██╔══╝  ██║     ██║     ██║   ██║██║╚██╔╝██║
- ╚██████╗███████╗██║  ██║███████╗██████╔╝███████╗███████╗███████╗╚██████╔╝██║ ╚═╝ ██║
-  ╚═════╝╚══════╝╚═╝  ╚═╝╚══════╝╚═════╝ ╚══════╝╚══════╝╚══════╝ ╚═════╝ ╚═╝     ╚═╝
-```
+# Cerebellum
 
-**LLM handles content. Cerebellum handles coordination.**
+**Describe the business process. Cerebellum makes it reliable, observable and recoverable.**
 
-[![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square&logo=python&logoColor=white)](https://python.org)
-[![Version](https://img.shields.io/badge/version-0.1.0-purple?style=flat-square)](CHANGELOG.md)
+[![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square)](pyproject.toml)
+[![Version](https://img.shields.io/badge/version-0.2.0-purple?style=flat-square)](src/cerebellum/_version.py)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
-[![Dependencies](https://img.shields.io/badge/dependencies-1-brightgreen?style=flat-square)](requirements.txt)
-[![Stars](https://img.shields.io/github/stars/your-org/cerebellum?style=flat-square&color=yellow)](https://github.com/your-org/cerebellum)
 
 </div>
 
----
+Cerebellum runs business workflows that combine **data** (PostgreSQL), **LLMs** (Claude with
+JSON-Schema outputs), **SaaS / REST APIs** and **people**. You declare the process in YAML.
+Cerebellum schedules it, validates every step, pauses for human approval, retries and falls back
+when systems misbehave, records a full trace, and resumes exactly where it stopped — even after
+the process is killed.
 
-Every multi-agent system eventually hits the same wall.
-
-Your agents are smart. They reason, they plan, they write. But the moment you chain more than three of them together — things fall apart. One timeout cascades into five. A $40 debugging run re-executes nodes that already succeeded. Agent B calls Agent C which is still waiting on Agent A, and nobody told the LLM to care about sequencing. You spend more time managing coordination than building intelligence.
-
-**Cerebellum is the coordination layer you've been patching together by hand.**
-
-It's the part of the brain that doesn't think — it just makes sure everything fires in the right order, at the right time, without wasting a single token.
-
-<br>
-
-## What it does
-
-```python
-from cerebellum import Cerebellum
-
-c = Cerebellum("my_run.db")
-
-c.node("search",   agent=search_fn)
-c.node("analyze",  agent=analyze_fn,  depends_on=["search"])
-c.node("write_a",  agent=writer_fn,   depends_on=["analyze"])
-c.node("write_b",  agent=writer_fn,   depends_on=["analyze"])   # ← runs in parallel
-c.node("merge",    agent=merge_fn,    depends_on=["write_a", "write_b"])
-
-c.on_fail("search", retry=3, timeout=10.0)
-c.on_fail("write_b", skip=True)        # optional — pipeline continues without it
-
-result = await c.run({"query": "topic"}, budget_usd=0.10)
+```text
+customer asks for a refund
+ 1  fetch_order        query      PostgreSQL
+ 2  policy_check       validate   deterministic rules
+ 3  assess_request     ai         Claude · structured output · repaired if invalid
+ 4  manager_approval   approval   only when amount > $500 or risk is high
+ 5  issue_refund       http       payments API · retry ×3 · idempotency key
+       ⤳ open_manual_case  task   when the API keeps failing
+ 6  mark_refunded      query      write back to the order
 ```
-
-`write_a` and `write_b` run in parallel. If the live data feed fails, it falls back to cache. If the run crashes at node 7 of 20, `resume=True` picks up from exactly where it left off — no re-running, no wasted cost.
-
-None of this requires an LLM call. The coordination is deterministic code.
-
-<br>
-
-## Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                       your agents                           │
-│          async functions that call LLMs, APIs, tools        │
-└──────────────────────────┬──────────────────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                      cerebellum.py                          │
-│                   integrated runtime                        │
-├──────────────┬──────────────────────┬───────────────────────┤
-│  engine.py   │   state_machine.py   │   message_bus.py      │
-│              │                      │                       │
-│  DAG         │   8-state FSM        │   typed pub/sub       │
-│  execution   │   SQLite             │   request / reply     │
-│  parallel    │   checkpoints        │   dead-letter queue   │
-│  scheduling  │   rollback /         │   full audit log      │
-│  budget cap  │   resume             │                       │
-└──────────────┴──────────────────────┴───────────────────────┘
-                           │
-┌──────────────────────────▼──────────────────────────────────┐
-│                       SQLite                                │
-│          run history · checkpoints · audit log              │
-└─────────────────────────────────────────────────────────────┘
-```
-
-Three modules. One file per concern. No magic.
-
-<br>
-
-## Features
-
-**Parallel execution by default**
-Independent branches run concurrently via `asyncio`. The scheduler uses topological sort — not an LLM — to determine what can run in parallel. A five-branch fan-out runs in the time of one branch.
-
-**Deterministic coordination**
-Scheduling, ordering, error routing, and state transitions are all handled by code with predictable outcomes. The LLM is called exactly once per agent, for content only.
-
-**Persistent checkpoints**
-Every node that reaches a terminal state writes a snapshot to SQLite. If the process dies, the next run picks up from the last clean checkpoint. Completed nodes are never re-executed.
-
-**Rollback to any point**
-Not just "resume latest" — you can roll back to any historical checkpoint by sequence number. Every checkpoint is an immutable record of system state at that moment.
-
-**Hard budget cap**
-Set `budget_usd=0.05` and Cerebellum tracks cumulative token cost across all agents. The moment the limit is breached, downstream nodes are cancelled. No runaway spend.
-
-**Typed message bus**
-Agents communicate through a central bus using typed envelopes (`EVENT`, `REQUEST`, `REPLY`, `COMMAND`, `ERROR`). Topics support wildcards. Every message is logged. Nothing disappears silently.
-
-**Graceful degradation**
-Three failure strategies per node: `retry` with exponential backoff, `skip` to continue the pipeline without the node, or `fallback` to route to an alternative node. Each is one line of config.
-
-<br>
 
 ## Quickstart
 
 ```bash
-git clone https://github.com/your-org/cerebellum
-cd cerebellum
-pip install -r requirements.txt   # one dependency: networkx
-python scenarios.py               # run all three demos
+make install            # python3 -m venv .venv && pip install -e ".[dev]"
+.venv/bin/cerebellum demo
 ```
 
-**Your agent contract**
+No API key, database or Docker is needed: the demo uses a SQLite sandbox seeded with orders, a
+local mock payments API with fault injection, and an offline mock AI. It runs five scenarios —
+automatic refund, human approval, flaky API retried, API outage handed to a person, suspicious
+request denied by the AI — and leaves one run waiting for you:
 
-```python
-async def my_agent(inputs: dict) -> tuple[Any, float]:
-    # inputs: outputs of upstream nodes + initial_input keys
-    result = await call_your_llm(inputs["upstream_node"])
-    cost   = 0.008   # USD — report what you spent
-    return result, cost
+```bash
+cerebellum approve <run-id> manager_approval --by you --sandbox
+cerebellum trace <run-id>
+cerebellum tasks
 ```
 
-That's the entire interface. An agent is an async function that takes a dict and returns `(output, cost_usd)`.
+Use Claude instead of the mock by setting `ANTHROPIC_API_KEY` (or `ant auth login`) and running
+`cerebellum demo --live`.
 
-<br>
+## Define a workflow
 
-## Scenarios
+```yaml
+name: refund_request
+params: {approval_threshold: 500}
+input:
+  order_id: {type: string, required: true}
+  amount: {type: number, required: true}
+connectors:
+  orders_db: {type: postgres, dsn: "${ORDERS_DSN:-sandbox}", seed: seed.sql}
+  payments:  {type: rest, base_url: "${PAYMENTS_URL:-http://127.0.0.1:8787}"}
+steps:
+  - id: fetch_order
+    type: query
+    connector: orders_db
+    sql: SELECT id, amount, status FROM orders WHERE id = :order_id
+    params: {order_id: "{{ input.order_id }}"}
+    expect: one
+  - id: manager_approval
+    type: approval
+    needs: [fetch_order]
+    when: "input.amount > params.approval_threshold"
+    title: "Refund {{ input.amount }} for {{ input.order_id }}"
+  - id: issue_refund
+    type: http
+    needs: [manager_approval]
+    connector: payments
+    method: POST
+    path: /refunds
+    body: {order_id: "{{ input.order_id }}", amount: "{{ input.amount }}"}
+    retry: {max: 3, base: 500ms}
+    on_failure: {fallback: open_manual_case}
+fallbacks:
+  - {id: open_manual_case, type: task, title: "Refund {{ input.order_id }} by hand", assignee: finance-ops}
+```
 
-Three runnable examples are included in `scenarios.py`.
+The full example lives in [`src/cerebellum/templates/refund/workflow.yaml`](src/cerebellum/templates/refund/workflow.yaml);
+`cerebellum init` copies it into your project.
 
-**Research pipeline** — 11 nodes, three parallel fan-outs. Web search feeds two parallel extractors, which feed three parallel writers, which feed parallel SEO and fact-check agents, which feed a publisher. Total wall time is bounded by the longest parallel branch, not the sum of all nodes.
+| Step type  | Does                                                    | Output                          |
+|------------|---------------------------------------------------------|---------------------------------|
+| `query`    | Parameterised SQL (`:name` binds only, never templated) | row / rows / `{rowcount}`       |
+| `http`     | REST call with `Idempotency-Key: <run>:<step>`          | `{status, body, headers}`       |
+| `ai`       | Claude structured output validated by JSON Schema       | the validated object            |
+| `validate` | Deterministic business rules                            | `{passed, checked}`             |
+| `approval` | Pauses the run until a human decides                    | `{approved, by, comment, ...}`  |
+| `task`     | Opens a manual task in the inbox                        | `{task_id, title, assignee}`    |
 
-**Trading signal pipeline** — live market data feed fails at runtime. Cerebellum automatically falls back to cached prices, runs momentum, mean-reversion, and sentiment agents in parallel, feeds an ensemble signal to a risk check, and executes the order — or skips it if confidence is below threshold. Budget cap prevents runaway cost on bad market data.
+Every step accepts `needs`, `when`, `timeout`, `retry` and `on_failure`. Expressions are
+sandboxed Jinja over `input`, `params`, `steps.<id>.{output,status,error}` and `run`.
 
-**Crash and resume** — an 8-step linear pipeline crashes at step 5. On the second run with `resume=True`, Cerebellum restores from the last checkpoint: steps 1–4 are skipped entirely, steps 5–8 re-run. Cost for the resumed run is exactly half the full run cost.
+## Reliability semantics
 
-<br>
+- **Event-sourced state.** Every state change is appended to an event log in SQLite together with
+  its projection, in one transaction. Traces, resume and the CLI all read the same source.
+- **Failure classification.** Timeouts, connection errors, 5xx, 429 and invalid AI output are
+  retried with exponential backoff; 4xx, rule violations, missing rows, template errors, refusals
+  and budget overruns fail immediately.
+- **Fallbacks.** When retries run out, the step's fallback runs; the step becomes `recovered`, its
+  output is the fallback's, downstream continues, and the run ends `needs_attention`.
+- **Human approval without a waiting process.** The run suspends (`waiting_approval`), the process
+  exits, and `approve` / `reject` resumes it later. Overdue approvals apply `on_timeout`.
+- **Crash-safe resume.** A lease marks the process driving a run. If it dies, `cerebellum resume`
+  re-runs only unfinished steps; HTTP side effects are deduplicated by the idempotency key.
+- **Budget cap.** `limits.budget_usd` stops the run when AI spend crosses the limit.
 
-## Why not LangGraph / AutoGen / Airflow?
+## Dashboard
 
-|                        | Cerebellum | LangGraph | AutoGen | Airflow |
-|------------------------|:----------:|:---------:|:-------:|:-------:|
-| Deterministic scheduling | ✓ | △ | ✗ | ✓ |
-| Parallel agent execution | ✓ | ✓ | △ | ✓ |
-| Exact crash resume       | ✓ | ✗ | ✗ | ✓ |
-| Hard budget cap          | ✓ | ✗ | ✗ | ✗ |
-| LLM-free coordination    | ✓ | △ | ✗ | ✓ |
-| Zero infra required      | ✓ | △ | ✓ | ✗ |
-| Typed inter-agent messages | ✓ | ✗ | ✗ | ✗ |
+```bash
+cerebellum ui            # http://127.0.0.1:7400 — also starts the sandbox payments API
+```
 
-△ = partial or optional
+- **Overview** — runs, success rate, latency, cost, pending approvals, open tasks, retries and fallbacks over 24 h; the run list updates live.
+- **Run detail** — the workflow DAG coloured by step status (running edges animate, fallbacks are dashed), a step inspector (output, errors, attempts, AI prompts and responses, HTTP and SQL calls) and the trace waterfall; resume failed runs and decide approvals in place.
+- **Approvals** — decision cards with the context the step chose to `show`; your name is remembered in the browser.
+- **Tasks** — the manual-task inbox that fallbacks fill.
+- **Evals** — every suite's pass-rate, cost and duration trends; per eval run, each case's failed expectations (expected vs actual), regression marks and a link to its run.
+- **Workflows** — YAML under `--workflows` (3 levels deep) plus every workflow runs were started from; YAML and DAG preview; start a run from a sample input.
 
-LangGraph gives you the graph abstraction but still routes coordination decisions through LLM calls. AutoGen is conversation-first — agents negotiate their own sequencing, which is non-deterministic by design. Airflow was built for data pipelines and doesn't understand token cost or LLM call semantics. Cerebellum is the layer none of them are.
+The demo refunds orders A1001–A1005, so a second refund of those is (correctly) refused by the policy check; start your own runs with the untouched orders A1008–A1012.
 
-<br>
+The dashboard reads the same SQLite store as the CLI, so runs started or approved in a terminal appear live. It binds to `127.0.0.1` and has no authentication — it is a local tool, and `--host` with any other address prints a warning. The UI ships prebuilt inside the Python package; `make ui` rebuilds it (Node 20.19+).
 
-## Roadmap
+## Evals
 
-- [ ] Redis-backed checkpoint store for multi-process deployments
-- [ ] FastAPI server — expose any graph as an HTTP endpoint
-- [ ] OpenTelemetry traces — per-node spans with token cost attributes
-- [ ] Graph visualiser — live execution map in the terminal
-- [ ] Workflow templates — one-line setup for common patterns (research, trading, content)
-- [ ] CLI — `cerebellum run graph.yaml`
+An eval suite pins what a workflow must do, case by case. Each case is a real run (tagged with the
+eval id, so its trace is one click away in the dashboard); approvals are decided by `eval`, the
+sandbox payments API is switched to the case's fault mode, and the finished run is checked.
 
-<br>
+```yaml
+suite: refund_regression
+workflow: workflow.yaml            # relative to this file
+defaults: {approval: approved, sandbox: never}
+cases:
+  - id: large_refund_rejected_by_a_human
+    input: {order_id: A1008, amount: 640}
+    approval: rejected
+    expect:
+      status: rejected
+      output.decision: rejected
+      steps.issue_refund.status: cancelled
+  - id: flaky_payments_api_is_retried
+    input: {order_id: A1009, amount: 89.9}
+    sandbox: "first:2"
+    expect: {status: succeeded, steps.issue_refund.attempts: 3}
+    assert: ["run.cost_usd < 0.05"]
+```
 
-## Contributing
+```bash
+cerebellum eval workflows/refund/evals.yaml --mock        # exit 1 below --min-pass (default 0.9)
+```
 
-Open an issue before opening a PR. Describe what you're solving, not what you're changing.
+`expect` paths: `status`, `error`, `output.*`, `steps.<id>.{status,output.*,attempts,error}`,
+`tasks.{count,open}`, `approvals.count`, `run.{id,cost_usd,duration_s}`; `assert` takes conditions
+over the same values. Connectors on `dsn: sandbox` get fresh databases per eval run
+(`.cerebellum/evals/<id>/`), so results repeat; `eval` prints where every connector points and
+warns in yellow when one is a real database or API (a set `ORDERS_DSN` / `PAYMENTS_URL`), because
+`--mock` only replaces the AI. Each eval run is compared with the previous completed run of the
+same suite and newly failing cases are flagged as regressions; eval case runs are records and
+cannot be resumed or approved (`cerebellum runs --evals` lists them). Manual tasks opened by eval cases are closed by `eval`, and eval
+runs stay out of the Overview metrics. The packaged suite (15 cases) is copied by `cerebellum init`.
 
-The coordination layer should remain LLM-free. If a proposed feature requires an LLM call inside the scheduler, it belongs in an agent, not in Cerebellum.
+## Draft a workflow from a description
 
-<br>
+```bash
+cerebellum new "When an invoice over 10k arrives, check the vendor in PostgreSQL, ask finance to approve, then post it to the ERP API" -o workflows/invoice.yaml
+```
 
-<div align="center">
+Claude gets the workflow JSON Schema, a step guide and the refund example; its YAML goes through
+the normal loader, and any issues are sent back for a repair (up to 3 attempts). The file starts
+with a comment marking it as an AI draft: review it before running. `new` needs Anthropic
+credentials; there is no offline fallback.
 
-Built with the conviction that **the brain that coordinates shouldn't be the same brain that thinks**.
+## CLI
 
-</div>
+| Command | Purpose |
+|---|---|
+| `cerebellum init [dir]` | Scaffold the refund example (workflow, seed, inputs, evals) and `.env.example` |
+| `cerebellum validate <wf>` / `show <wf>` | Check a definition / print its steps |
+| `cerebellum run <wf> -i @input.json [--param k=v] [--sandbox] [--mock]` | Start a run (exit 3 while waiting for approval) |
+| `cerebellum runs` / `status <run>` / `trace <run>` | Observe runs, steps and span waterfalls |
+| `cerebellum approvals` / `approve <run>` / `reject <run>` | Human-in-the-loop decisions |
+| `cerebellum resume <run>` | Continue after a crash, a failure or an approval |
+| `cerebellum tasks [resolve <id>]` | Manual tasks opened by fallbacks |
+| `cerebellum connectors check <wf>` | Health-check every connector |
+| `cerebellum sandbox [--fail first:2]` | Run the mock payments API in the foreground |
+| `cerebellum ui [--port 7400] [--workflows dir] [--no-sandbox] [--open]` | Local dashboard (runs, traces, approvals, tasks, workflows) |
+| `cerebellum eval <suite> [--mock] [--min-pass 0.9] [--no-sandbox]` | Run an eval suite and compare with the previous run |
+| `cerebellum new "<description>" -o <file> [--force]` | Draft a workflow YAML with Claude (validated, repaired) |
+| `cerebellum demo [--live]` | Five end-to-end refund scenarios |
+
+## Configuration
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | — | Enables the Claude provider (otherwise mock AI) |
+| `CEREBELLUM_MODEL` | `claude-opus-5-5` | Default model for `ai` steps |
+| `CEREBELLUM_MOCK` | unset | `1` forces the mock AI |
+| `CEREBELLUM_HOME` | `./.cerebellum` | Run history and sandbox databases |
+| `CEREBELLUM_SANDBOX_PORT` | `8787` | Port of the local payments sandbox |
+| `CEREBELLUM_PRICING_FILE` | unset | JSON overriding model prices |
+| `CEREBELLUM_UI_HOST` / `CEREBELLUM_UI_PORT` | `127.0.0.1` / `7400` | Dashboard bind address |
+| `CEREBELLUM_WORKER_INTERVAL` | `30` | Seconds between the dashboard's approval-timeout sweeps |
+| `ORDERS_DSN` | `sandbox` | Real PostgreSQL DSN for the example (`pip install -e ".[postgres]"`, `docker compose up -d`) |
+| `PAYMENTS_URL` / `PAYMENTS_TOKEN` | sandbox | Payments API used by the example |
+
+## Architecture
+
+```
+ CLI (Typer + Rich) ──┐   Dashboard (cerebellum ui) ──┐
+                      ▼                                ▼
+ server/    FastAPI API · SSE stream · worker · prebuilt UI
+ spec/      YAML → validated Workflow (pydantic, sandboxed Jinja, JSON Schema)
+ runtime/   Engine · scheduler · retry/fallback · approvals · leases · event store (SQLite)
+ steps/     query · http · ai · validate · task
+ connectors/ postgres (psycopg | SQLite sandbox) · rest (httpx)      ai/ Claude · mock
+ sandbox/   mock payments API with fault injection and idempotency
+ evals/     suites · runner (one run per case) · checks · baseline comparison
+ authoring.py  cerebellum new: description → validated YAML draft
+ ui/        React + Vite + Tailwind + React Flow source (built into server/static)
+```
+
+## Development
+
+```bash
+make install
+make test        # ruff format --check, ruff check, pytest (+ vitest once `make ui-install` ran)
+make ui          # rebuild the dashboard (npm ci + vite build)
+make demo
+make eval        # the packaged eval suite with the mock AI
+```
+
+Optional suites: `CEREBELLUM_TEST_PG_DSN=postgresql://… pytest -m postgres` and
+`pytest -m live` (real Claude calls).
+
+## License
+
+MIT
