@@ -71,6 +71,15 @@ def test_pricing_file_override(tmp_path):
         ('{"m": {"input": 1e400, "output": 2}}', "'m' needs"),
         ('{"m": {"input": -1, "output": 2}}', "'m' needs"),
         ('{"m": {"input": 1, "output": 2, "cache_read": -0.5}}', "'m' needs"),
+        # Review finding: a JSON integer too large for a float raised a bare OverflowError.
+        pytest.param(
+            '{"m": {"input": ' + "9" * 400 + ', "output": 1}}', "'m' needs", id="huge-int-input"
+        ),
+        pytest.param(
+            '{"m": {"input": 1, "output": 2, "cache_write": ' + "9" * 400 + "}}",
+            "'m' needs",
+            id="huge-int-cache_write",
+        ),
     ],
 )
 def test_a_bad_pricing_file_is_a_config_error(tmp_path, content, problem):
