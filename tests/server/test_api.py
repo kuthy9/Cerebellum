@@ -1,5 +1,6 @@
 import asyncio
 import json
+import re
 import time
 
 import httpx
@@ -329,6 +330,31 @@ def test_head_requests_to_the_ui_are_answered(store, settings, tmp_path):
             assert c.head(path).status_code == 405, path
     with TestClient(app_with(store, settings, tmp_path, tmp_path / "not-built")) as c:
         assert c.head("/").status_code == 200
+
+
+def test_post_only_api_routes_answer_get_and_head_with_405_naming_post(store, settings, tmp_path):
+    """Review finding: once the UI route accepted HEAD it also claimed HEAD on the POST-only API
+    paths and answered 405 naming GET; GET on them answered 404 from the UI route."""
+    app = app_with(store, settings, tmp_path, make_static(tmp_path))
+    methods: dict[str, set[str]] = {}  # GET /api/runs and POST /api/runs are two routes
+    for route in app.routes:
+        if route.path.startswith("/api/") and getattr(route, "methods", None):
+            methods.setdefault(route.path, set()).update(route.methods)
+    post_only = sorted(path for path, allowed in methods.items() if allowed == {"POST"})
+    assert post_only == [
+        "/api/approvals/{approval_id}/decision",
+        "/api/runs/{run_id}/resume",
+        "/api/tasks/{task_id}/resolve",
+    ]
+    with TestClient(app) as c:
+        for template in post_only:
+            path = re.sub(r"\{\w+\}", "x_12345678", template)
+            for method in ("GET", "HEAD"):
+                answer = c.request(method, path)
+                assert answer.status_code == 405, (method, path, answer.status_code)
+                assert answer.headers.get("allow") == "POST", (method, path)
+        index = c.head("/")
+        assert index.status_code == 200 and index.headers.get("cache-control") == "no-cache"
 
 
 def test_paths_the_filesystem_rejects_fall_back_to_the_ui(store, settings, tmp_path):
