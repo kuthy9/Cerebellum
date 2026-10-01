@@ -96,6 +96,17 @@ def test_expect_paths_with_empty_segments_are_rejected(path):
     assert path_problem(path, {"fetch_order"}) == "has an empty segment"
 
 
+def test_non_string_expect_keys_have_a_readable_path(tmp_path):
+    body = "suite: s\nworkflow: WORKFLOW\ncases:\n  - id: a\n    expect: {1: x, 1.5: y, null: z}\n"
+    with pytest.raises(SpecError) as exc:
+        load_suite(write_suite(tmp_path, body), env={})
+    assert issue_map(exc) == {
+        "cases[0].expect (key 1)": "Input should be a valid string",
+        "cases[0].expect (key 1.5)": "Input should be a valid string",
+        "cases[0].expect (key None)": "Input should be a valid string",
+    }
+
+
 def test_suite_structure_errors_use_yaml_paths(tmp_path):
     path = write_suite(tmp_path, "suite: Bad Name\nworkflow: WORKFLOW\ncases: []\nextra: 1\n")
     with pytest.raises(SpecError) as exc:

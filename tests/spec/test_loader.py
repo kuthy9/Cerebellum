@@ -143,6 +143,16 @@ def test_structural_error_paths_omit_the_union_tag():
     assert not any(".query.sql" in i or ".http." in i or ".postgres." in i for i in issues)
 
 
+def test_non_string_mapping_keys_have_a_readable_path():
+    def mutate(d):
+        d["params"][1] = "x"
+        d["connectors"][2] = {"type": "rest", "base_url": "http://127.0.0.1:9"}
+
+    issues = issues_of(variant(mutate))
+    assert "params (key 1): Input should be a valid string" in issues
+    assert "connectors (key 2): Input should be a valid string" in issues
+
+
 def test_duplicate_ids():
     text = variant(lambda d: d["fallbacks"].append({"id": "load", "type": "task", "title": "x"}))
     assert "fallbacks[1].id: duplicate step id 'load'" in issues_of(text)

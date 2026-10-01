@@ -36,6 +36,8 @@ _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _CONNECTOR_TYPES = {"query": "postgres", "http": "rest"}
 # Workflow fields whose items are unions discriminated by `type`.
 _TAGGED_FIELDS = ("steps", "fallbacks", "connectors")
+# What pydantic appends to an error location when a mapping key itself is invalid.
+_KEY_MARKER = "[key]"
 
 
 def load_workflow(path: str | Path, *, env: Mapping[str, str] | None = None) -> Workflow:
@@ -84,8 +86,12 @@ def parse_workflow(
 
 def issue_path(loc: tuple[Any, ...]) -> str:
     out = ""
-    for part in loc:
-        if isinstance(part, int):
+    for i, part in enumerate(loc):
+        if part == _KEY_MARKER:
+            continue
+        if loc[i + 1 : i + 2] == (_KEY_MARKER,):
+            out += f" (key {part})" if out else f"(key {part})"
+        elif isinstance(part, int):
             out += f"[{part}]"
         else:
             out += f".{part}" if out else str(part)
