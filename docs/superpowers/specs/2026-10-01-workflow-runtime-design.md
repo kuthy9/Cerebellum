@@ -98,7 +98,7 @@ Cerebellum/
 
 | type | 关键字段 | 输出 |
 |---|---|---|
-| `query` | `connector`、`sql`、`params`、`expect: one\|many\|none\|any` | `one` → 行 dict；其余 → 行列表；写语句 → `{rowcount}` |
+| `query` | `connector`、`sql`、`params`、`expect: one\|many\|none\|any` | `one` → 行 dict；其余 → 行列表；写语句 → `{rowcount}`（带 `RETURNING` 的写语句按查询处理，返回行并应用 `expect`；`WITH … UPDATE/INSERT/DELETE` 是写语句；开头的注释不影响判断） |
 | `http` | `connector`、`method`、`path`、`body`、`headers`、`query` | `{status, body, headers(白名单)}`；自动带 `Idempotency-Key: <run_id>:<step_id>` |
 | `ai` | `prompt`、`system`、`output_schema`、`model`、`effort`、`max_repairs`（默认 2）、`mock` | 校验通过的 JSON 对象 |
 | `validate` | `rules: [{expr, message}]` | `{passed: true}`；任一规则不满足即不可重试失败，错误含全部未通过的 message |
@@ -122,7 +122,7 @@ Cerebellum/
 
 ### 3.6 加载期校验（`cerebellum validate`）
 
-Pydantic 结构校验；id 全局唯一（含 fallbacks）；`needs` / `fallback` / `show` 引用存在；主流程无环；fallback 不得出现在主流程 `needs` 中；所有表达式可编译；step 引用的 connector 已声明且类型匹配；`output_schema` 是合法 JSON Schema（加载时为每个 object 自动补 `additionalProperties: false`）。错误带 YAML 路径（如 `steps[3].when`）。
+Pydantic 结构校验；id 全局唯一（含 fallbacks）；`needs` / `fallback` / `show` 引用存在；主流程 step 的表达式、模板与审批 `show` 只能引用自身（`show` 不能引用自身）、其 `needs` 中（直接或传递）的 step，以及这些上游 step 所属的 fallback（fallback 与 workflow 级 `output` 可引用任意 step）；run 的 `input` 只接受 `input:` 中声明的键；主流程无环；fallback 不得出现在主流程 `needs` 中；所有表达式可编译；step 引用的 connector 已声明且类型匹配；`output_schema` 是合法 JSON Schema（加载时为每个 object 自动补 `additionalProperties: false`）。错误带 YAML 路径（如 `steps[3].when`）。
 
 ### 3.7 退款示例
 
@@ -148,7 +148,7 @@ Pydantic 结构校验；id 全局唯一（含 fallbacks）；`needs` / `fallback
 | `tasks(id, run_id, step_id, title, assignee, payload, status, created_at, resolved_at)` | 人工任务 |
 | `eval_runs`、`eval_results` | 阶段 3 |
 
-事件与投影在**同一事务**内写入。事件类型：`run.started|suspended|resumed|completed`、`step.started|retrying|succeeded|failed|skipped|cancelled|waiting|recovered`、`approval.requested|decided|expired`、`task.created|resolved`、`llm.call`、`connector.call`。
+事件与投影在**同一事务**内写入。事件类型：`run.started|suspended|resumed|completed|failed`（`run.failed`：引擎自身出错，取消在途 step，错误为 `engine error: …`，修复后可 `resume`）、`step.started|retrying|succeeded|failed|skipped|cancelled|waiting|recovered|reset`（`cancelled` 也可跟在运行中或重试中的 step 之后；`reset`：崩溃或停止后 resume 时把被中断的 attempt 记为 `interrupted`）、`approval.requested|decided|expired`、`task.created|resolved`、`llm.call`、`connector.call`。
 
 **Tracing**：每次 step attempt 是一个 span；`llm.call` / `connector.call` 是其子 span（含耗时、token、成本、状态码、是否 mock）。敏感 header（`Authorization`、名称含 token/key/secret/password 的字段）在写入前替换为 `***`。
 
@@ -173,7 +173,8 @@ Pydantic 结构校验；id 全局唯一（含 fallbacks）；`needs` / `fallback
 1. 执行到 `approval` 且 `when` 为真：写 `approvals` 行与 `approval.requested` 事件，step 进入 `waiting`；其他独立分支继续。
 2. 没有可执行 step 且存在等待中的审批 → run `waiting_approval`，释放 lease，**进程正常退出**。CLI 打印下一步命令。
 3. `approve` / `reject`（CLI 或 UI）→ 写 `approval.decided` → 抢 lease → 续跑（CLI 可 `--no-resume`）。
-4. 超时：server 内置 worker 每 30s 扫描，CLI `resume` 时也检查；过期按 `on_timeout` 处理并记 `approval.expired`（`by: system`、`auto: true`）。未设 `timeout` 则无限等待。
+4. 超时：server 内置 worker 每 30s 扫描，CLI `resume` 时也检查；过期按 `on_timeout` 处理并记 `approval.expired`（`by: system`、`auto: true`）。未设 `timeout` 则无限等待。超时后才到达的人工决定被拒绝（CLI 报错，API 409），改为应用 `on_timeout` 并续跑。
+5. 用 Claude API 启动的 run 不会在 mock AI 上续跑：CLI 的 `approve` / `reject` / `resume` 退出码 1（`--no-resume` 仍可记录决定），mock 模式的 dashboard 对决定/续跑返回 409，其 worker 扫描跳过这类 run（每个 run 只记一次日志）。
 
 ### 4.6 Lease 与崩溃恢复
 
@@ -229,7 +230,8 @@ Pydantic 结构校验；id 全局唯一（含 fallbacks）；`needs` / `fallback
 - 结构：`suite`、`workflow`、`defaults: {approval, sandbox, mock}`、`cases: [{id, input, approval?, sandbox?, expect: {dotted.path: value}, assert: [expr]}]`。可断言路径：`status`、`output.*`、`steps.<id>.{status,output.*}`、`tasks.count`、`run.cost_usd`、`run.duration_s`。
 - 每条 case 产生一次真实 run（`eval_run_id` 标记，可在 UI 下钻 trace）；审批按 case 自动决策（`approved|rejected`，记录 `by: eval`）。
 - case 顺序执行（沙盒失败模式是进程级设置，按 case 切换，保证结果确定）。
-- 结果：通过率、每条 case 的期望/实际/失败断言、成本与耗时、AI schema 首次通过率与修复重试次数；与上一次同套件 eval 对比，标出回归。
+- 结果：通过率、每条 case 的期望/实际/失败断言、成本与耗时、AI schema 首次通过率与修复重试次数；与上一次同套件、同 AI 模式（mock / Claude）的已完成 eval 对比，标出回归。
+- 同一 `CEREBELLUM_HOME` 同时只允许一个 `eval`（`eval.lock`）；运行中的 eval 定期写心跳，超过 `CEREBELLUM_LEASE_SECONDS` 无心跳显示为 stale，下一次同套件 eval 将其记为 errored。`cerebellum evals prune [--keep 10]` 只删除旧 eval 的沙盒目录，保留数据库中的历史。
 - `--min-pass` 未达标退出码 1。示例套件约 15 条 case。
 
 ### 8.2 `cerebellum new`
