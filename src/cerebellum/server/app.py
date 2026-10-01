@@ -11,6 +11,8 @@ from typing import Any
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import (
     FileResponse,
     HTMLResponse,
@@ -179,6 +181,7 @@ def create_app(
         docs_url="/api/docs",
         openapi_url="/api/openapi.json",
         redoc_url=None,
+        default_response_class=js.APIResponse,
     )
     if allowed_hosts is not None:
         app.add_middleware(HostGuard, allowed=allowed_hosts)
@@ -186,13 +189,18 @@ def create_app(
     @app.exception_handler(CerebellumError)
     async def cerebellum_error(request: Request, exc: CerebellumError) -> JSONResponse:
         if isinstance(exc, NotFound):
-            return JSONResponse({"detail": str(exc)}, status_code=404)
+            return js.APIResponse({"detail": str(exc)}, status_code=404)
         if isinstance(exc, SpecError):
             issues = [{"path": issue.path, "message": issue.message} for issue in exc.issues]
-            return JSONResponse(
+            return js.APIResponse(
                 {"detail": {"message": str(exc), "issues": issues}}, status_code=400
             )
-        return JSONResponse({"detail": str(exc)}, status_code=409)
+        return js.APIResponse({"detail": str(exc)}, status_code=409)
+
+    @app.exception_handler(RequestValidationError)
+    async def invalid_request(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # FastAPI's own handler, but its errors echo the input, which may be NaN or Infinity
+        return js.APIResponse({"detail": jsonable_encoder(exc.errors())}, status_code=422)
 
     def parts(request: Request) -> tuple[Store, Worker, Catalog]:
         state = request.app.state

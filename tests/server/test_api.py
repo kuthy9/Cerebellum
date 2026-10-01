@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 
 from cerebellum.ai.mock import MockProvider
 from cerebellum.runtime.engine import Engine
+from cerebellum.runtime.states import RunStatus, StepStatus
 from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments_app
 from cerebellum.server.app import create_app
 from cerebellum.server.catalog import Catalog
@@ -266,6 +267,150 @@ def test_the_workflow_catalog_is_scanned_off_the_event_loop(client, store, monke
     assert client.get(f"/api/workflows/{WORKFLOW_ID}").status_code == 200
     settled(store, start(client, "small"), "succeeded")
     assert scanned_on == ["thread", "thread", "thread"]
+
+
+NAN, INF = float("nan"), float("inf")
+
+
+def strict_json(response):
+    """The body as standard JSON: a NaN or Infinity token (which browsers refuse) fails."""
+
+    def refuse(token):
+        raise AssertionError(f"{token} in {response.request.method} {response.request.url}")
+
+    return json.loads(response.text, parse_constant=refuse)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '{"workflow": "workflow.yaml", "input": {"order_id": "A1001", "amount": NaN}}',
+        '{"workflow": "workflow.yaml", "input": {"order_id": "A1001", "amount": 1e400}}',
+        '{"workflow": "workflow.yaml", "input": {"order_id": "A1001", "amount": 10}, '
+        '"params": {"approval_threshold": NaN}}',
+        '{"workflow": "workflow.yaml", "input": {"order_id": "A1001", "amount": 10}, '
+        '"params": {"approval_threshold": {"tiers": [1, -Infinity]}}}',
+        '{"workflow": "workflow.yaml", "input": NaN}',
+    ],
+)
+def test_starting_a_run_with_a_non_finite_number_is_refused(client, store, body):
+    """Review finding: POST /api/runs stored a run with NaN in its input or params and answered
+    500, and from then on every GET /api/runs answered 500 too."""
+    refused = client.post("/api/runs", content=body, headers={"content-type": "application/json"})
+    assert 400 <= refused.status_code < 500, refused.text
+    strict_json(refused)
+    assert store.list_runs() == []
+    assert client.get("/api/runs").status_code == 200
+
+
+def test_runs_holding_non_finite_numbers_are_served_with_null(client, store, simple_workflow):
+    """Review finding: Starlette's JSONResponse refuses NaN and the infinities, so a stored run
+    holding one (a query or AI output, an older run, an infinite cost) made the runs list, the
+    run detail and its events answer 500. Every JSON endpoint serves such a number as null."""
+    run_id = "r_0000a001"
+    store.save_workflow(simple_workflow)
+    store.create_run(run_id, simple_workflow, {"order_id": "A1", "n": NAN}, {"x": INF}, mock=True)
+    store.step_transition(run_id, "first", StepStatus.RUNNING, event="started", span_id="first#1")
+    store.record_call(
+        run_id,
+        "first",
+        "ai",
+        span_id="ai#1",
+        parent_span_id="first#1",
+        data={"n": NAN},
+        cost_usd=INF,
+    )
+    store.step_transition(
+        run_id,
+        "first",
+        StepStatus.SUCCEEDED,
+        event="succeeded",
+        span_id="first#1",
+        output={"score": NAN, "low": -INF},
+    )
+    store.step_transition(run_id, "second", StepStatus.RUNNING, event="started", span_id="second#1")
+    store.request_approval(
+        run_id, "second", title="t", context={"n": NAN}, expires_at=None, on_timeout="reject"
+    )
+    store.create_task(run_id, "rescue", title="t", assignee="ops", payload={"n": -INF})
+    store.set_run_status(run_id, RunStatus.NEEDS_ATTENTION, event="recovered", output={"n": NAN})
+    urls = (
+        "/api/runs",
+        f"/api/runs/{run_id}",
+        f"/api/runs/{run_id}/events",
+        "/api/approvals?status=all",
+        "/api/tasks?status=all",
+        "/api/metrics",
+        "/api/workflows",
+    )
+    answers = {}
+    for url in urls:
+        response = client.get(url)
+        assert response.status_code == 200, (url, response.text)
+        answers[url] = strict_json(response)
+    [run] = answers["/api/runs"]["runs"]
+    assert run["input"] == {"order_id": "A1", "n": None} and run["params"] == {"x": None}
+    assert run["cost_usd"] is None and run["output"] == {"n": None}
+    detail = answers[f"/api/runs/{run_id}"]
+    [first] = [step for step in detail["steps"] if step["step_id"] == "first"]
+    assert first["output"] == {"score": None, "low": None} and first["cost_usd"] is None
+    assert detail["approvals"][0]["context"] == {"n": None}
+    assert detail["tasks"][0]["payload"] == {"n": None}
+    assert detail["spans"]
+    started = answers[f"/api/runs/{run_id}/events"]["events"][0]
+    assert started["data"]["input"]["n"] is None and started["data"]["params"]["x"] is None
+    assert answers["/api/metrics"]["cost_usd"] is None
+
+
+def test_workflows_holding_non_finite_numbers_are_served_with_null(store, settings, tmp_path):
+    """YAML reads .inf and .nan as numbers, and a sample input file may hold NaN."""
+    (tmp_path / "unbounded.yaml").write_text(
+        "name: unbounded\nparams: {limit: .inf, floor: -.inf}\n"
+        "input:\n  amount: {type: number}\n"
+        "steps:\n  - {id: check, type: validate, rules: [{expr: 'true', message: ok}]}\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs" / "odd.json").write_text('{"amount": NaN}', encoding="utf-8")
+    with TestClient(app_with(store, settings, tmp_path, tmp_path / "not-built")) as c:
+        listed = c.get("/api/workflows")
+        assert listed.status_code == 200 and strict_json(listed)["workflows"]
+        detail = c.get("/api/workflows/unbounded.yaml")
+        assert detail.status_code == 200, detail.text
+        assert strict_json(detail)["params"] == {"limit": None, "floor": None}
+        assert strict_json(detail)["samples"] == {"odd": {"amount": None}}
+
+
+def test_evals_holding_non_finite_numbers_are_served_with_null(client, store):
+    store.create_eval_run(
+        "ev_0000a001",
+        suite="s",
+        suite_path="/x/evals.yaml",
+        workflow_name="wf",
+        workflow_digest="d1",
+        mock=True,
+        total=1,
+        baseline_id=None,
+    )
+    store.record_eval_result(
+        "ev_0000a001",
+        case_id="a",
+        position=0,
+        run_id=None,
+        passed=False,
+        baseline_passed=None,
+        checks=[{"path": "output.n", "expected": 1, "actual": NAN, "ok": False}],
+        error=None,
+        cost_usd=INF,
+        duration_s=None,
+    )
+    for url in ("/api/evals", "/api/evals/ev_0000a001"):
+        response = client.get(url)
+        assert response.status_code == 200, (url, response.text)
+        strict_json(response)
+    detail = strict_json(client.get("/api/evals/ev_0000a001"))
+    assert detail["eval"]["cost_usd"] is None
+    assert detail["results"][0]["checks"][0]["actual"] is None
 
 
 def make_static(tmp_path):

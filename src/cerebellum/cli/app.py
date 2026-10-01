@@ -304,19 +304,23 @@ def _parse_input(raw: str) -> dict[str, Any]:
         except OSError as exc:
             _fail(f"cannot read input file {path}: {exc.strerror}", EXIT_INVALID)
     try:
-        data = json.loads(text)
+        # NaN, Infinity and numbers out of float range (1e400) are refused, as for --param: a
+        # run's input must stay serialisable as JSON.
+        data = json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
     except json.JSONDecodeError as exc:
         _fail(
             f"input is not valid JSON: {exc.msg} (line {exc.lineno}, column {exc.colno})",
             EXIT_INVALID,
         )
+    except ValueError as exc:  # a rejected constant or float, an over-long integer
+        _fail(f"input is not valid JSON: {exc}", EXIT_INVALID)
     if not isinstance(data, dict):
         _fail("input must be a JSON object", EXIT_INVALID)
     return data
 
 
 def _reject_constant(name: str) -> NoReturn:
-    raise ValueError(f"{name} is not JSON")
+    raise ValueError(f"{name} is not a JSON number")
 
 
 def _finite_float(text: str) -> float:
