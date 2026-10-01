@@ -235,8 +235,15 @@ def semantic_issues(wf: Workflow) -> list[SpecIssue]:
             if step.retry.max or step.on_failure:
                 issues.append(SpecIssue(path, "approval steps cannot declare retry or on_failure"))
             for ref in step.show:
-                if ref not in all_ids:
-                    issues.append(SpecIssue(f"{path}.show", f"unknown step '{ref}'"))
+                # The approver sees what has settled when the approval runs.
+                if is_fallback:  # already rejected above
+                    problem = None if ref in all_ids else f"unknown step '{ref}'"
+                elif ref == step.id:
+                    problem = "an approval cannot show itself"
+                else:
+                    problem = stray_ref(step.id, ref)
+                if problem:
+                    issues.append(SpecIssue(f"{path}.show", problem))
 
         if isinstance(step, QueryStep | HttpStep):
             expected = _CONNECTOR_TYPES[step.type]

@@ -307,6 +307,28 @@ def test_references_to_steps_that_are_not_upstream_are_rejected():
     ]
 
 
+def test_approval_shows_only_upstream_steps():
+    """The approver sees each `show` step's output when the approval runs: a step that has not
+    settled by then would show nothing."""
+
+    def gate(show):
+        return {"id": "gate", "type": "approval", "needs": ["call"], "title": "ok?", "show": show}
+
+    parse_workflow(variant(lambda d: d["steps"].append(gate(["load", "call", "manual"]))), env={})
+
+    def mutate(d):
+        d["steps"].insert(1, gate(["load", "call", "manual", "gate", "ghost"]))
+        d["steps"][1]["needs"] = ["load"]
+
+    not_upstream = "is not upstream of 'gate' (not in its needs, directly or transitively)"
+    assert issues_of(variant(mutate)) == [
+        f"steps[1].show: step 'call' {not_upstream}",
+        "steps[1].show: fallback 'manual' does not belong to a step upstream of 'gate'",
+        "steps[1].show: an approval cannot show itself",
+        "steps[1].show: unknown step 'ghost'",
+    ]
+
+
 def test_references_to_upstream_steps_itself_and_from_fallbacks_are_accepted():
     def mutate(d):
         d["steps"][2]["body"]["one"] = "{{ steps.load.output.one }}"
