@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import sqlite3
 import threading
 import time
@@ -21,6 +22,8 @@ from cerebellum.connectors.base import (
 
 SANDBOX_DSN = "sandbox"
 T = TypeVar("T")
+# A dollar quote's opening `$tag$`: the tag is empty or a word not starting with a digit.
+_DOLLAR_TAG = re.compile(r"\$(?:[^\W\d]\w*)?\$")
 
 # One lock per sandbox file in this process: connectors of different pools (concurrent runs)
 # may open the same file, and only one of them may create and seed it.
@@ -38,22 +41,59 @@ def _file_lock(path: Path) -> threading.Lock:
         return _FILE_LOCKS.setdefault(key, threading.Lock())
 
 
+def _opaque_end(sql: str, i: int) -> int:
+    """Where the comment or quoted text that starts at `sql[i]` ends, or `i` if none starts
+    there, by PostgreSQL's rules: `--` comments run to the end of the line, `/* */` comments
+    nest, `$tag$` quotes end at the same tag, a backslash escapes the next character in
+    `E'...'` strings, and `'...'` or `"..."` end at the next quote (a doubled quote reads as
+    two adjacent quoted texts, which copies the same). Unclosed text runs to the end."""
+    n = len(sql)
+    if sql.startswith("--", i):
+        ends = [k for k in (sql.find("\n", i), sql.find("\r", i)) if k >= 0]
+        return min(ends, default=n)
+    if sql.startswith("/*", i):
+        depth, j = 1, i + 2
+        while j < n and depth:
+            if sql.startswith("/*", j):
+                depth, j = depth + 1, j + 2
+            elif sql.startswith("*/", j):
+                depth, j = depth - 1, j + 2
+            else:
+                j += 1
+        return j
+    # `$` and `E` only open text at the start of a word: `a$b$` and `name'...'` do not.
+    starts_word = i == 0 or not (sql[i - 1].isalnum() or sql[i - 1] in "_$")
+    if sql[i] == "$" and starts_word and (tag := _DOLLAR_TAG.match(sql, i)):
+        end = sql.find(tag[0], tag.end())
+        return n if end < 0 else end + len(tag[0])
+    if sql[i] in "eE" and sql.startswith("'", i + 1) and starts_word:
+        j = i + 2
+        while j < n:
+            if sql[j] == "\\" or sql.startswith("''", j):
+                j += 2
+            elif sql[j] == "'":
+                return j + 1
+            else:
+                j += 1
+        return n
+    if sql[i] in "'\"":
+        end = sql.find(sql[i], i + 1)
+        return n if end < 0 else end + 1
+    return i
+
+
 def to_pyformat(sql: str) -> str:
     """Convert `:name` placeholders to psycopg's `%(name)s`, escape literal `%`, and leave
-    `::casts` and quoted text untouched."""
+    `::casts` untouched. Comments and quoted text (see `_opaque_end`) are copied as written
+    except that their `%` is escaped too: psycopg reads placeholders in the whole text."""
     out: list[str] = []
-    i, n, quote = 0, len(sql), ""
+    i, n = 0, len(sql)
     while i < n:
         ch = sql[i]
-        if quote:
-            out.append("%%" if ch == "%" else ch)
-            if ch == quote:
-                quote = ""
-            i += 1
-        elif ch in ("'", '"'):
-            quote = ch
-            out.append(ch)
-            i += 1
+        end = _opaque_end(sql, i)
+        if end > i:
+            out.append(sql[i:end].replace("%", "%%"))
+            i = end
         elif ch == "%":
             out.append("%%")
             i += 1

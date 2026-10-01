@@ -57,6 +57,87 @@ def test_to_pyformat(sql, expected):
     assert to_pyformat(sql) == expected
 
 
+@pytest.mark.parametrize(
+    ("sql", "expected"),
+    [
+        # An apostrophe in a comment opened a fake quote that hid every later bind.
+        pytest.param(
+            "SELECT 1 -- don't\nFROM t WHERE a = :a",
+            "SELECT 1 -- don't\nFROM t WHERE a = %(a)s",
+            id="apostrophe-in-line-comment",
+        ),
+        pytest.param(
+            "SELECT /* it's */ a FROM t WHERE a = :a",
+            "SELECT /* it's */ a FROM t WHERE a = %(a)s",
+            id="apostrophe-in-block-comment",
+        ),
+        # A :name in a comment became a parameter nobody supplied; % is still doubled there,
+        # because psycopg looks for % placeholders in the whole text.
+        pytest.param(
+            "SELECT :a -- 5% off for :b\n",
+            "SELECT %(a)s -- 5%% off for :b\n",
+            id="bind-and-percent-in-line-comment",
+        ),
+        pytest.param(
+            "SELECT /* :b 100% */ :a",
+            "SELECT /* :b 100%% */ %(a)s",
+            id="bind-and-percent-in-block-comment",
+        ),
+        pytest.param(
+            "SELECT /* outer /* inner */ still :b, it's */ :a",
+            "SELECT /* outer /* inner */ still :b, it's */ %(a)s",
+            id="nested-block-comment",
+        ),
+        pytest.param(
+            "SELECT 1 -- note\rWHERE a = :a",
+            "SELECT 1 -- note\rWHERE a = %(a)s",
+            id="line-comment-ends-at-carriage-return",
+        ),
+        pytest.param("SELECT :a /* open :b", "SELECT %(a)s /* open :b", id="unclosed-comment"),
+        # Dollar quotes.
+        pytest.param(
+            "SELECT $$it's :x$$ AS s WHERE a = :a",
+            "SELECT $$it's :x$$ AS s WHERE a = %(a)s",
+            id="dollar-quote",
+        ),
+        pytest.param(
+            "SELECT $fn$ it's 5% :x $$ $fn$ AS body, :a",
+            "SELECT $fn$ it's 5%% :x $$ $fn$ AS body, %(a)s",
+            id="tagged-dollar-quote",
+        ),
+        pytest.param("SELECT $1, :a", "SELECT $1, %(a)s", id="positional-parameter"),
+        pytest.param(
+            "SELECT a$b$c, :a FROM t", "SELECT a$b$c, %(a)s FROM t", id="dollar-in-identifier"
+        ),
+        # E'...' strings, where a backslash escapes the next character.
+        pytest.param(
+            "SELECT E'it\\'s :x' AS s WHERE a = :a",
+            "SELECT E'it\\'s :x' AS s WHERE a = %(a)s",
+            id="escape-string",
+        ),
+        pytest.param(
+            "SELECT e'a\\'b 5%' AS s, :a",
+            "SELECT e'a\\'b 5%%' AS s, %(a)s",
+            id="lowercase-escape-string",
+        ),
+        # Elsewhere a backslash is just a character, and an E ending a word starts no E-string.
+        pytest.param(
+            "SELECT name'C:\\' AS p, :a",
+            "SELECT name'C:\\' AS p, %(a)s",
+            id="typed-literal-ending-in-e",
+        ),
+        pytest.param(
+            'SELECT "a:b%" FROM t WHERE c = :c',
+            'SELECT "a:b%%" FROM t WHERE c = %(c)s',
+            id="quoted-identifier",
+        ),
+        pytest.param("SELECT 5 - :a / :b", "SELECT 5 - %(a)s / %(b)s", id="minus-and-slash"),
+    ],
+)
+def test_to_pyformat_postgres_comments_and_strings(sql, expected):
+    assert to_pyformat(sql) == expected
+
+
 def test_jsonable():
     assert jsonable(Decimal("12.50")) == 12.5
     assert jsonable(date(2026, 10, 1)) == "2026-10-01"
