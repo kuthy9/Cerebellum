@@ -201,6 +201,13 @@ def test_serves_the_ui_with_an_spa_fallback(store, settings, tmp_path):
         assert c.get("/api/nope").status_code == 404
 
 
+def test_paths_the_filesystem_rejects_fall_back_to_the_ui(store, settings, tmp_path):
+    app = app_with(store, settings, tmp_path, make_static(tmp_path))
+    with TestClient(app, raise_server_exceptions=False) as c:
+        page = c.get("/%00")  # a NUL byte: no file can have that name
+        assert page.status_code == 200 and "<title>ui</title>" in page.text
+
+
 def test_explains_how_to_build_a_missing_ui(store, settings, tmp_path):
     with TestClient(app_with(store, settings, tmp_path, tmp_path / "not-built")) as c:
         page = c.get("/")

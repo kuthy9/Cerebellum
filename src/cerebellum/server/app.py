@@ -350,8 +350,11 @@ def create_app(
         if path == "api" or path.startswith("api/"):
             raise HTTPException(404, "not found")
         root = static_dir.resolve()
-        candidate = (root / path).resolve()
-        if path and candidate.is_file() and root in candidate.parents:
+        try:
+            candidate = (root / path).resolve()
+        except ValueError:
+            candidate = None  # a name no file can have, e.g. one with a NUL byte
+        if path and candidate and candidate.is_file() and root in candidate.parents:
             return FileResponse(candidate)
         index = root / "index.html"
         if index.is_file():
