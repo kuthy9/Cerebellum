@@ -251,8 +251,19 @@ def test_output_templates_are_checked():
 
 def test_validate_input_accepts_valid_data():
     wf = parse_workflow(dump(BASE), env={})
-    data = {"order_id": "A1", "amount": 12.5, "tier": "gold", "extra": True}
+    data = {"order_id": "A1", "amount": 12.5, "tier": "gold"}
     assert validate_input(wf, data) == data
+
+
+def test_validate_input_rejects_undeclared_keys():
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError) as info:
+        validate_input(wf, {"order_id": "A1", "amount": "1", "extra": True, "colour": None})
+    assert [str(i) for i in info.value.issues] == [
+        "input.amount: expected number, got str '1'",
+        "input.colour: is not declared in the workflow",
+        "input.extra: is not declared in the workflow",
+    ]
 
 
 def test_validate_input_reports_every_problem():
