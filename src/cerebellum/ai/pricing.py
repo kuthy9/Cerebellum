@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from cerebellum.ai.base import Usage
+from cerebellum.config import MAX_PRICE_PER_MILLION_TOKENS
 from cerebellum.errors import ConfigError
 
 
@@ -57,7 +58,7 @@ class Pricing:
             data = json.loads(path.read_text(encoding="utf-8"))
         except OSError as exc:
             raise ConfigError(f"cannot read {where}: {exc.strerror or exc}") from exc
-        except ValueError as exc:  # invalid JSON or not UTF-8
+        except (ValueError, RecursionError) as exc:  # invalid JSON, not UTF-8, nested too deep
             raise ConfigError(f"{where} is not valid JSON: {exc}") from exc
         if not isinstance(data, dict):
             raise ConfigError(f"{where} must be a JSON object that maps model names to prices")
@@ -66,8 +67,9 @@ class Pricing:
                 pricing.prices[model] = _model_price(entry)
             except (KeyError, TypeError, ValueError) as exc:
                 raise ConfigError(
-                    f"{where}: {model!r} needs non-negative numeric input and output prices "
-                    "per million tokens (optional: cache_read, cache_write), e.g. "
+                    f"{where}: {model!r} needs numeric input and output prices from 0 to "
+                    f"{MAX_PRICE_PER_MILLION_TOKENS:,.0f} per million tokens (optional: "
+                    "cache_read, cache_write), e.g. "
                     '{"input": 4.0, "output": 20.0}'
                 ) from exc
         return pricing
@@ -78,15 +80,16 @@ class Pricing:
 
 
 def _price(value: Any) -> float:
-    """A JSON number that is finite and not negative; booleans and strings are not prices."""
+    """A JSON number from 0 to MAX_PRICE_PER_MILLION_TOKENS; booleans and strings are not
+    prices, and a bigger one would let costs overflow to inf (or NaN: 0 * inf)."""
     if isinstance(value, bool) or not isinstance(value, int | float):
         raise TypeError(f"a price must be a JSON number, not {value!r}")
     try:
         price = float(value)
     except OverflowError:  # a JSON integer too large for a float
         raise ValueError("a price must be finite, not an integer too large for a float") from None
-    if not math.isfinite(price) or price < 0:
-        raise ValueError(f"a price must be finite and not negative, not {value!r}")
+    if not math.isfinite(price) or not 0 <= price <= MAX_PRICE_PER_MILLION_TOKENS:
+        raise ValueError(f"a price must be from 0 to {MAX_PRICE_PER_MILLION_TOKENS}, not {value!r}")
     return price
 
 

@@ -1,4 +1,5 @@
 import json
+import math
 from types import SimpleNamespace
 
 import anthropic
@@ -10,7 +11,7 @@ from cerebellum.ai.anthropic_provider import REFUSAL_FALLBACK_BETA, AnthropicPro
 from cerebellum.ai.base import AIError, AIRequest, Usage
 from cerebellum.ai.mock import MockProvider
 from cerebellum.ai.pricing import DEFAULT_PRICES, ModelPrice, Pricing
-from cerebellum.config import Settings
+from cerebellum.config import MAX_PRICE_PER_MILLION_TOKENS, Settings
 from cerebellum.errors import ConfigError
 from cerebellum.spec.models import MockRule
 
@@ -80,6 +81,15 @@ def test_pricing_file_override(tmp_path):
             "'m' needs",
             id="huge-int-cache_write",
         ),
+        # Review finding: nesting too deep for the JSON decoder raised a bare RecursionError.
+        pytest.param(
+            '{"m": ' + "[" * 100_000 + "]" * 100_000 + "}", "is not valid JSON", id="too-deep"
+        ),
+        # Review finding: a finite but enormous price made costs inf, or NaN (0 * inf) through
+        # the derived cache_write price, and a NaN cost never trips a budget.
+        ('{"m": {"input": 1.7e308, "output": 1}}', "'m' needs"),
+        ('{"m": {"input": 1, "output": 1e300}}', "'m' needs"),
+        ('{"m": {"input": 1, "output": 2, "cache_read": 1e20}}', "'m' needs"),
     ],
 )
 def test_a_bad_pricing_file_is_a_config_error(tmp_path, content, problem):
@@ -90,6 +100,16 @@ def test_a_bad_pricing_file_is_a_config_error(tmp_path, content, problem):
     with pytest.raises(ConfigError, match=problem) as info:
         Pricing.load(path)
     assert "CEREBELLUM_PRICING_FILE" in str(info.value) and str(path) in str(info.value)
+
+
+def test_the_largest_allowed_price_gives_finite_costs(tmp_path):
+    path = tmp_path / "prices.json"
+    path.write_text(
+        json.dumps({"m": {"input": MAX_PRICE_PER_MILLION_TOKENS, "output": 1}}), encoding="utf-8"
+    )
+    usage = Usage(input_tokens=10**9, output_tokens=0, cache_creation_input_tokens=10**9)
+    cost = Pricing.load(path).cost("m", usage)
+    assert math.isfinite(cost) and cost > 0
 
 
 def request(**overrides):

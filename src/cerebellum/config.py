@@ -38,6 +38,9 @@ DEFAULT_NEW_ATTEMPTS = 3
 # and the interrupt repeated at this interval until the statement's thread ends; SQLite drops an
 # interrupt that arrives before the statement starts.
 SANDBOX_INTERRUPT_RETRY_SECONDS = 0.05
+# CEREBELLUM_PRICING_FILE: the highest price accepted, in USD per million tokens ($1 per token).
+# Far above any real model, low enough that costs stay finite numbers a budget can compare.
+MAX_PRICE_PER_MILLION_TOKENS = 1_000_000.0
 
 _TRUTHY = {"1", "true", "yes", "on"}
 _CREDENTIAL_ENV_VARS = (
