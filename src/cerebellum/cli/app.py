@@ -57,7 +57,7 @@ from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments
 from cerebellum.sandbox.server import SandboxHandle, sandbox_url, start_sandbox
 from cerebellum.server import create_app
 from cerebellum.server.app import dashboard_server, loopback_host_names
-from cerebellum.spec import load_workflow
+from cerebellum.spec import load_workflow, parse_workflow
 from cerebellum.spec.inputs import TOO_DEEP
 from cerebellum.spec.models import Workflow
 from cerebellum.templates import template_path
@@ -393,33 +393,58 @@ def _drive_live(
         unsubscribe()
 
 
-def _show_run(store: Store, run: RunRecord, workflow: Workflow, mode: str) -> None:
+def _show_run(
+    store: Store, run: RunRecord, workflow: Workflow, mode: str, settings: Settings
+) -> None:
     steps = store.get_steps(run.run_id)
     console.print(render.run_view(run, workflow, steps, mode=mode, stale=store.is_stale(run)))
-    _print_outcome(store, run)
+    _print_outcome(store, run, settings)
 
 
-def _print_outcome(store: Store, run: RunRecord) -> None:
+def _sandbox_flag(store: Store, run: RunRecord, settings: Settings) -> str:
+    """The flag hints add (`--sandbox` after a space, or nothing) to continue `run`: --sandbox
+    when the run's workflow has a REST connector whose base URL, in the environment --sandbox
+    gives it, is this home's sandbox URL (as `cerebellum eval` decides what its sandbox isolates).
+    Continued without it, such a run's payments calls find no API."""
+    url = sandbox_url(settings.sandbox_host, settings.sandbox_port)
+    env = dict(os.environ)
+    if SANDBOX_URL_ENV not in env:  # as _sandbox does
+        env[SANDBOX_URL_ENV] = url
+    try:
+        source, base_dir = store.get_workflow_source(run.workflow_digest)
+        workflow = parse_workflow(source, base_dir=base_dir, env=env, require_env=False)
+    except CerebellumError:  # a snapshot that no longer parses here: no hint about it
+        return ""
+    targets = connector_targets(workflow, url)
+    return " --sandbox" if any(t.kind == "rest" and t.isolated for t in targets) else ""
+
+
+def _print_outcome(store: Store, run: RunRecord, settings: Settings) -> None:
     rid = run.run_id
     if run.status is RunStatus.WAITING_APPROVAL:
+        flag = _sandbox_flag(store, run, settings)
         for approval in store.list_approvals(run_id=rid, status="pending"):
             console.print(
                 Text("⏸ ", style="yellow") + Text(f"awaiting approval · {approval.title}")
             )
             console.print(
                 Text(
-                    f"  cerebellum approve {rid} {approval.step_id} --by <you>", style=render.ACCENT
+                    f"  cerebellum approve {rid} {approval.step_id} --by <you>{flag}",
+                    style=render.ACCENT,
                 )
             )
             console.print(
                 Text(
-                    f"  cerebellum reject {rid} {approval.step_id} --by <you> -m <why>",
+                    f"  cerebellum reject {rid} {approval.step_id} --by <you> -m <why>{flag}",
                     style=render.MUTED,
                 )
             )
     elif run.status is RunStatus.FAILED:
+        flag = _sandbox_flag(store, run, settings)
         console.print(Text("✕ ", style="red") + Text(run.error or "run failed"))
-        console.print(Text(f"  fix the cause, then: cerebellum resume {rid}", style=render.MUTED))
+        console.print(
+            Text(f"  fix the cause, then: cerebellum resume {rid}{flag}", style=render.MUTED)
+        )
     elif run.status is RunStatus.REJECTED:
         expired = {
             event.data.get("approval_id")
@@ -443,7 +468,8 @@ def _print_outcome(store: Store, run: RunRecord) -> None:
         console.print(Text("  cerebellum tasks", style=render.ACCENT))
     elif run.status is RunStatus.RUNNING and store.is_stale(run):
         console.print(Text("◐ ", style="red") + Text("the process driving this run stopped"))
-        console.print(Text(f"  cerebellum resume {rid}", style=render.ACCENT))
+        flag = _sandbox_flag(store, run, settings)
+        console.print(Text(f"  cerebellum resume {rid}{flag}", style=render.ACCENT))
     if run.output is not None:
         console.print(render.output_view(run.output))
 
@@ -611,7 +637,7 @@ def run(
                 _invalid("run input is invalid", exc)
             except CerebellumError as exc:
                 _fail(str(exc))
-            _show_run(store, record, wf, choice.reason)
+            _show_run(store, record, wf, choice.reason, settings)
     raise typer.Exit(_exit_code(record.status))
 
 
@@ -662,7 +688,7 @@ def status(run_id: Annotated[str, typer.Argument(help="Run id.")]) -> None:
         if tasks:
             console.print()
             console.print(render.tasks_table(tasks, now=now))
-        _print_outcome(store, run)
+        _print_outcome(store, run, settings)
 
 
 @app.command()
@@ -728,7 +754,7 @@ def _decide(
             if comment:
                 line.append(f" · {comment}", style=render.MUTED)
             console.print(line)
-            _show_run(store, record, workflow, _mode(run))
+            _show_run(store, record, workflow, _mode(run), settings)
     raise typer.Exit(_exit_code(record.status))
 
 
@@ -798,7 +824,7 @@ def resume(
                 _fail(f"{exc}; try again once it finishes")
             except CerebellumError as exc:
                 _fail(str(exc))
-            _show_run(store, record, workflow, _mode(run))
+            _show_run(store, record, workflow, _mode(run), settings)
     raise typer.Exit(_exit_code(record.status))
 
 

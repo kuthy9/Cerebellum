@@ -152,6 +152,64 @@ def test_large_refund_waits_then_approve_resumes(runner):
     assert "approved · alice" in invoke(runner, "status", run_id).text
 
 
+def hint(text, command, you="alice"):
+    """The arguments of the first `cerebellum <command> ...` hint in `text`, <you> filled in."""
+    for line in text.splitlines():
+        start = line.find(f"cerebellum {command} ")
+        if start >= 0:
+            return [you if arg == "<you>" else arg for arg in line[start:].split()[1:]]
+    raise AssertionError(f"no `cerebellum {command}` hint in:\n{text}")
+
+
+def test_hints_to_continue_a_run_on_the_sandbox_include_it(runner):
+    """Review finding: on a refund run waiting for approval, `status` suggested approving
+    without --sandbox (unlike `demo`); following that hint, the refund found no payments API
+    and fell back to a manual task."""
+    started = invoke(runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'large.json'}", "--sandbox")
+    assert started.exit_code == 3, started.text
+    run_id = run_id_of(started)
+    status = invoke(runner, "status", run_id)
+    for text in (started.text, status.text):
+        assert f"cerebellum approve {run_id} manager_approval --by <you> --sandbox" in text
+        assert f"cerebellum reject {run_id} manager_approval --by <you> -m <why> --sandbox" in text
+    approved = invoke(runner, *hint(status.text, "approve"))
+    assert approved.exit_code == 0, approved.text
+    assert '"decision": "refunded"' in approved.text and "manual task" not in approved.text
+
+
+PING_FLOW = """
+name: ping
+connectors:
+  api: {type: rest, base_url: "${PAYMENTS_URL}"}
+steps:
+  - {id: ping, type: http, connector: api, method: GET, path: /health}
+"""
+
+
+def test_the_hint_to_resume_a_failed_run_on_the_sandbox_includes_it(runner, tmp_path):
+    flow = tmp_path / "ping.yaml"
+    flow.write_text(PING_FLOW, encoding="utf-8")
+    failed = invoke(runner, "run", str(flow))  # no --sandbox: nothing listens on its port
+    assert failed.exit_code == 1, failed.text
+    run_id = run_id_of(failed)
+    for text in (failed.text, invoke(runner, "status", run_id).text):
+        assert f"cerebellum resume {run_id} --sandbox" in text, text
+    resumed = invoke(runner, *hint(failed.text, "resume"))
+    assert resumed.exit_code == 0, resumed.text
+
+
+def test_hints_leave_out_the_sandbox_when_the_run_does_not_call_it(runner, tmp_path, monkeypatch):
+    flow = tmp_path / "needs_env.yaml"
+    flow.write_text(ENV_FLOW, encoding="utf-8")
+    monkeypatch.setenv("CEREBELLUM_TEST_API_URL", "http://127.0.0.1:9")
+    started = invoke(runner, "run", str(flow))
+    assert started.exit_code == 3, started.text
+    run_id = run_id_of(started)
+    for text in (started.text, invoke(runner, "status", run_id).text):
+        assert f"cerebellum approve {run_id} gate --by <you>" in text, text
+        assert "--sandbox" not in text
+
+
 def test_reject_marks_the_run_rejected(runner):
     started = invoke(runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'large.json'}", "--sandbox")
     run_id = run_id_of(started)
