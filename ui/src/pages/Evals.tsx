@@ -4,7 +4,7 @@ import { api } from "../api";
 import { Sparkline } from "../components/Sparkline";
 import { Empty, ErrorNote, Label, PageHeader, Panel } from "../components/ui";
 import { useNow } from "../hooks/useNow";
-import { type SuiteSummary, aiMode, groupBySuite } from "../lib/evals";
+import { type SuiteSummary, aiMode, elapsed, groupBySuite, isLive } from "../lib/evals";
 import { fmtAge, fmtCost, fmtDuration, fmtPercent } from "../lib/format";
 import { toneColor } from "../lib/status";
 import type { EvalRun } from "../types";
@@ -12,6 +12,12 @@ import type { EvalRun } from "../types";
 const HEADINGS = ["Eval", "Passed", "Regressions", "Cost", "Duration", "AI first try", "AI", "Age"];
 
 export function EvalOutcome({ run }: { run: EvalRun }) {
+  if (run.status === "running" && run.stale)
+    return (
+      <span style={{ color: toneColor("fail") }} title="the process running this eval stopped">
+        ◌ stale · {run.passed + run.failed}/{run.total}
+      </span>
+    );
   if (run.status === "running") return <span style={{ color: toneColor("accent") }}>◐ running · {run.passed + run.failed}/{run.total}</span>;
   if (run.status === "errored") return <span style={{ color: toneColor("fail") }}>✕ errored · {run.passed}/{run.total}</span>;
   const tone = run.failed ? "fail" : "ok";
@@ -79,7 +85,7 @@ function SuitePanel({ summary, now }: { summary: SuiteSummary; now: number }) {
                 {run.regressions ? `↓ ${run.regressions}` : "—"}
               </td>
               <td className="mono px-3 text-muted">{fmtCost(run.cost_usd) || "$0"}</td>
-              <td className="mono px-3 text-muted">{fmtDuration(run.duration_s ?? now - run.created_at)}</td>
+              <td className="mono px-3 text-muted">{fmtDuration(elapsed(run, now))}</td>
               <td className="mono px-3 text-muted">{fmtPercent(run.ai_first_pass_rate)}</td>
               <td className="px-3 text-faint">{aiMode(run)}</td>
               <td className="px-3 text-faint">{fmtAge(run.created_at, now)}</td>
@@ -96,7 +102,7 @@ export function Evals() {
   const evals = useQuery({
     queryKey: ["evals"],
     queryFn: api.evals,
-    refetchInterval: (query) => (query.state.data?.some((run) => run.status === "running") ? 2000 : false),
+    refetchInterval: (query) => (query.state.data?.some(isLive) ? 2000 : false),
   });
   const suites = groupBySuite(evals.data ?? []);
   return (

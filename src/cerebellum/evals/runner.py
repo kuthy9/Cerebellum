@@ -3,6 +3,7 @@ with the previous completed run of the same suite and AI mode."""
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import dataclasses
 import secrets
@@ -62,6 +63,8 @@ class EvalRunner:
         on_result: Callable[[EvalCase, EvalResultRecord], None] | None = None,
     ) -> EvalRunRecord:
         suite = loaded.suite
+        # An earlier eval of this suite whose process died never finished its row: record it.
+        self.store.abandon_stale_eval_runs(suite.suite, timeout=self.settings.lease_seconds)
         baseline = self.store.latest_eval_run(suite.suite, mock=self.provider.mock)
         previous = (
             {result.case_id: result.passed for result in self.store.get_eval_results(baseline.id)}
@@ -90,6 +93,7 @@ class EvalRunner:
             total=len(suite.cases),
             baseline_id=baseline.id if baseline else None,
         )
+        heartbeat = asyncio.create_task(self._heartbeat(eval_run_id))
         run_ids: list[str] = []
         try:
             for position, case in enumerate(suite.cases):
@@ -112,9 +116,21 @@ class EvalRunner:
             if self.set_fail_mode is not None:
                 with contextlib.suppress(Exception):
                     await self.set_fail_mode("never")
+            heartbeat.cancel()
+            # A failed heartbeat write only weakens the liveness hint; it must not fail the eval.
+            with contextlib.suppress(asyncio.CancelledError, Exception):
+                await heartbeat
         return self.store.finish_eval_run(
             eval_run_id, status="completed", **self._ai_stats(run_ids)
         )
+
+    async def _heartbeat(self, eval_run_id: str) -> None:
+        """Keep the eval's heartbeat fresh while it runs; readers call an eval whose heartbeat
+        is older than the lease time stale (see Store.is_eval_stale)."""
+        interval = max(self.settings.lease_seconds / 3, 0.05)
+        while True:
+            await asyncio.sleep(interval)
+            self.store.eval_heartbeat(eval_run_id)
 
     async def _run_case(
         self,

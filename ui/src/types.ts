@@ -149,9 +149,13 @@ export interface EvalRun {
   error: string | null;
   created_at: number;
   ended_at: number | null;
+  /** Last sign of life from the process running the eval. */
+  heartbeat_at: number | null;
   pass_rate: number | null;
   duration_s: number | null;
   ai_first_pass_rate: number | null;
+  /** Still "running", but its process stopped sending heartbeats. */
+  stale: boolean;
 }
 
 export interface EvalCheck {

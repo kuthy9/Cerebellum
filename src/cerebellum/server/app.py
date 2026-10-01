@@ -27,7 +27,7 @@ from cerebellum.config import DEFAULT_UI_SHUTDOWN_GRACE_SECONDS, Settings
 from cerebellum.errors import CerebellumError, NotFound, SpecError
 from cerebellum.runtime.engine import load_run_workflow
 from cerebellum.runtime.states import RunStatus
-from cerebellum.runtime.store import RunRecord, Store
+from cerebellum.runtime.store import EvalRunRecord, RunRecord, Store
 from cerebellum.runtime.trace import build_spans
 from cerebellum.server import serialize as js
 from cerebellum.server.catalog import Catalog
@@ -284,11 +284,16 @@ def create_app(
             raise HTTPException(400, str(exc)) from exc
         return {**active.metrics(active.clock.now() - seconds), "window": window}
 
+    def eval_json(active: Store, record: EvalRunRecord) -> dict[str, Any]:
+        # Stale: still "running" with no heartbeat for a lease period (its process died).
+        stale = active.is_eval_stale(record, timeout=settings.lease_seconds)
+        return js.eval_run_json(record, stale=stale)
+
     @app.get("/api/evals")
     async def list_evals(request: Request, suite: str | None = None, limit: int = 100):
         active, _, _ = parts(request)
         records = active.list_eval_runs(suite=suite, limit=min(max(limit, 1), 500))
-        return {"evals": [js.eval_run_json(record) for record in records]}
+        return {"evals": [eval_json(active, record) for record in records]}
 
     @app.get("/api/evals/{eval_run_id}")
     async def eval_detail(eval_run_id: str, request: Request):
@@ -301,10 +306,10 @@ def create_app(
         history = active.list_eval_runs(suite=record.suite, limit=EVAL_HISTORY)
         history.reverse()
         return {
-            "eval": js.eval_run_json(record),
-            "baseline": None if baseline is None else js.eval_run_json(baseline),
+            "eval": eval_json(active, record),
+            "baseline": None if baseline is None else eval_json(active, baseline),
             "results": [js.eval_result_json(r) for r in active.get_eval_results(eval_run_id)],
-            "history": [js.eval_run_json(r) for r in history],
+            "history": [eval_json(active, r) for r in history],
         }
 
     @app.get("/api/workflows")

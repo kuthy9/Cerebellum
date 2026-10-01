@@ -132,7 +132,8 @@ CREATE TABLE IF NOT EXISTS eval_runs (
     baseline_id     TEXT,
     error           TEXT,
     created_at      REAL NOT NULL,
-    ended_at        REAL
+    ended_at        REAL,
+    heartbeat_at    REAL
 );
 CREATE INDEX IF NOT EXISTS idx_eval_runs_suite ON eval_runs(suite, created_at);
 CREATE TABLE IF NOT EXISTS eval_results (
@@ -290,6 +291,7 @@ class EvalRunRecord:
     error: str | None
     created_at: float
     ended_at: float | None
+    heartbeat_at: float | None  # last sign of life from the process running it
 
     @property
     def pass_rate(self) -> float | None:
@@ -465,6 +467,25 @@ class Store:
             self._conn.execute("PRAGMA journal_mode=WAL")
             self._conn.execute("PRAGMA busy_timeout=10000")
             self._conn.executescript(SCHEMA)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Bring a database created by an earlier version up to SCHEMA, in place. The column
+        check is repeated under the write lock, so concurrent openers add a column only once."""
+
+        def columns(table: str) -> set[str]:
+            return {row["name"] for row in self._conn.execute(f"PRAGMA table_info({table})")}
+
+        if "heartbeat_at" in columns("eval_runs"):
+            return
+        self._conn.execute("BEGIN IMMEDIATE")
+        try:
+            if "heartbeat_at" not in columns("eval_runs"):
+                self._conn.execute("ALTER TABLE eval_runs ADD COLUMN heartbeat_at REAL")
+        except BaseException:
+            self._conn.execute("ROLLBACK")
+            raise
+        self._conn.execute("COMMIT")
 
     # ── lifecycle ─────────────────────────────────────────────────────────────
 
@@ -1025,7 +1046,8 @@ class Store:
         with self._tx() as tx:
             tx.execute(
                 "INSERT INTO eval_runs(id, suite, suite_path, workflow_name, workflow_digest, "
-                "status, mock, total, baseline_id, created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                "status, mock, total, baseline_id, created_at, heartbeat_at) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     eval_run_id,
                     suite,
@@ -1037,9 +1059,43 @@ class Store:
                     total,
                     baseline_id,
                     tx.now,
+                    tx.now,
                 ),
             )
         return self.get_eval_run(eval_run_id)
+
+    def eval_heartbeat(self, eval_run_id: str) -> None:
+        """Record that the process running this eval is alive (a finished eval is left as is)."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE eval_runs SET heartbeat_at=? WHERE id=? AND status='running'",
+                (self.clock.now(), eval_run_id),
+            )
+
+    def is_eval_stale(self, record: EvalRunRecord, *, timeout: float) -> bool:
+        """An eval that claims to be running but sent no heartbeat for `timeout` seconds: its
+        process died. Rows from before the heartbeat column are judged by their start."""
+        if record.status != "running":
+            return False
+        last = record.heartbeat_at if record.heartbeat_at is not None else record.created_at
+        return last < self.clock.now() - timeout
+
+    def abandon_stale_eval_runs(self, suite: str, *, timeout: float) -> list[str]:
+        """Record the stale running evals of `suite` as errored ("abandoned"), ended at their
+        last heartbeat. Returns their ids, oldest first."""
+        with self._tx() as tx:
+            rows = tx.execute(
+                "SELECT id FROM eval_runs WHERE suite=? AND status='running' "
+                "AND COALESCE(heartbeat_at, created_at) < ? ORDER BY created_at, rowid",
+                (suite, tx.now - timeout),
+            ).fetchall()
+            for row in rows:
+                tx.execute(
+                    "UPDATE eval_runs SET status='errored', error=?, "
+                    "ended_at=COALESCE(heartbeat_at, created_at) WHERE id=?",
+                    ("abandoned: the process running this eval stopped before it finished", row[0]),
+                )
+        return [row[0] for row in rows]
 
     def record_eval_result(
         self,

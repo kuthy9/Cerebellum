@@ -59,8 +59,9 @@ def span_json(span: Span) -> dict[str, Any]:
     return dataclasses.asdict(span)
 
 
-def eval_run_json(record: EvalRunRecord) -> dict[str, Any]:
+def eval_run_json(record: EvalRunRecord, *, stale: bool = False) -> dict[str, Any]:
     data = dataclasses.asdict(record)
+    data["stale"] = stale
     data["pass_rate"] = record.pass_rate
     data["duration_s"] = None if record.ended_at is None else record.ended_at - record.created_at
     data["ai_first_pass_rate"] = (

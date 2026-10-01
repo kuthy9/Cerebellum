@@ -59,6 +59,19 @@ export function describeCheck(check: EvalCheck): string {
   return `${check.target}: expected ${show(check.expected)} · got ${show(check.actual)}`;
 }
 
+/** Running with a live process: worth polling. A stale eval (its process died) never changes. */
+export function isLive(run: Pick<EvalRun, "status" | "stale">): boolean {
+  return run.status === "running" && !run.stale;
+}
+
+/** How long an eval ran: its duration once finished, its age while live, and for a stale eval
+ * the time until its last heartbeat (it stopped then; its age would only keep growing). */
+export function elapsed(run: Pick<EvalRun, "duration_s" | "created_at" | "heartbeat_at" | "stale">, now: number): number {
+  if (run.duration_s != null) return run.duration_s;
+  if (run.stale) return (run.heartbeat_at ?? run.created_at) - run.created_at;
+  return now - run.created_at;
+}
+
 /** The AI an eval ran with. An eval is compared only with a baseline of the same mode. */
 export function aiMode(run: Pick<EvalRun, "mock">): "mock" | "claude" {
   return run.mock ? "mock" : "claude";

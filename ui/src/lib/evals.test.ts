@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { EvalCheck, EvalResult, EvalRun } from "../types";
-import { aiMode, caseChange, describeCheck, groupBySuite, sparkPoints } from "./evals";
+import { aiMode, caseChange, describeCheck, elapsed, groupBySuite, isLive, sparkPoints } from "./evals";
 
 const run = (id: string, suite: string, extra: Partial<EvalRun> = {}): EvalRun => ({
   id,
@@ -25,6 +25,8 @@ const run = (id: string, suite: string, extra: Partial<EvalRun> = {}): EvalRun =
   pass_rate: 1,
   duration_s: 1,
   ai_first_pass_rate: null,
+  heartbeat_at: 1,
+  stale: false,
   ...extra,
 });
 
@@ -79,6 +81,25 @@ describe("describeCheck", () => {
   it("shows why an assertion failed", () => {
     expect(describeCheck({ ...base, kind: "assert", target: "run.cost_usd < 1", actual: null })).toBe("assert run.cost_usd < 1 → false");
     expect(describeCheck({ ...base, kind: "assert", target: "'x' in error", actual: "TypeError: boom" })).toBe("assert 'x' in error → TypeError: boom");
+  });
+});
+
+describe("isLive", () => {
+  it("is true only for a running eval whose process still beats", () => {
+    expect(isLive(run("ev_1", "a", { status: "running" }))).toBe(true);
+    expect(isLive(run("ev_1", "a", { status: "running", stale: true }))).toBe(false);
+    expect(isLive(run("ev_1", "a"))).toBe(false);
+    expect(isLive(run("ev_1", "a", { status: "errored" }))).toBe(false);
+  });
+});
+
+describe("elapsed", () => {
+  it("is a finished eval's duration, a live one's age, a stale one's time until its last heartbeat", () => {
+    const running = { status: "running" as const, ended_at: null, duration_s: null, created_at: 10 };
+    expect(elapsed(run("ev_1", "a", { duration_s: 4 }), 100)).toBe(4);
+    expect(elapsed(run("ev_1", "a", running), 100)).toBe(90);
+    expect(elapsed(run("ev_1", "a", { ...running, heartbeat_at: 30, stale: true }), 100)).toBe(20);
+    expect(elapsed(run("ev_1", "a", { ...running, heartbeat_at: null, stale: true }), 100)).toBe(0);
   });
 });
 

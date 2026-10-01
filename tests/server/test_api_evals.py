@@ -81,6 +81,27 @@ async def test_eval_endpoints_list_runs_and_show_cases_with_regressions(
     assert client.get(f"/api/evals/{first.id}").json()["baseline"] is None
 
 
+def test_eval_json_says_when_a_running_eval_lost_its_process(client, store, settings, clock):
+    """Review finding: the Evals pages polled a killed eval's "running" row forever."""
+    store.create_eval_run(
+        "ev_00000001",
+        suite="s",
+        suite_path="/x/evals.yaml",
+        workflow_name="wf",
+        workflow_digest="d1",
+        mock=True,
+        total=2,
+        baseline_id=None,
+    )
+    [alive] = client.get("/api/evals").json()["evals"]
+    assert alive["stale"] is False and alive["heartbeat_at"] == clock.now()
+    clock.advance(settings.lease_seconds + 1)
+    [stale] = client.get("/api/evals").json()["evals"]
+    assert stale["status"] == "running" and stale["stale"] is True
+    detail = client.get("/api/evals/ev_00000001").json()
+    assert detail["eval"]["stale"] is True and detail["history"][0]["stale"] is True
+
+
 def test_unknown_eval_is_404(client):
     response = client.get("/api/evals/ev_nope")
     assert response.status_code == 404 and "ev_nope" in response.json()["detail"]

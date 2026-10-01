@@ -1,8 +1,39 @@
+import sqlite3
+
 import pytest
 
 from cerebellum.ai.mock import MockProvider
 from cerebellum.errors import NotFound
 from cerebellum.runtime.engine import Engine
+from cerebellum.runtime.store import Store
+
+# The eval_runs table as databases created before the heartbeat column have it.
+EVAL_RUNS_BEFORE_HEARTBEAT = """
+CREATE TABLE eval_runs (
+    id              TEXT PRIMARY KEY,
+    suite           TEXT NOT NULL,
+    suite_path      TEXT NOT NULL,
+    workflow_name   TEXT NOT NULL,
+    workflow_digest TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    mock            INTEGER NOT NULL,
+    total           INTEGER NOT NULL,
+    passed          INTEGER NOT NULL DEFAULT 0,
+    failed          INTEGER NOT NULL DEFAULT 0,
+    regressions     INTEGER NOT NULL DEFAULT 0,
+    cost_usd        REAL NOT NULL DEFAULT 0,
+    ai_first_try    INTEGER NOT NULL DEFAULT 0,
+    ai_first_ok     INTEGER NOT NULL DEFAULT 0,
+    ai_repairs      INTEGER NOT NULL DEFAULT 0,
+    baseline_id     TEXT,
+    error           TEXT,
+    created_at      REAL NOT NULL,
+    ended_at        REAL
+);
+INSERT INTO eval_runs(id, suite, suite_path, workflow_name, workflow_digest, status, mock, total,
+                      created_at)
+VALUES ('ev_00000001', 's', '/x/evals.yaml', 'wf', 'd1', 'running', 1, 2, 1790000000.0);
+"""
 
 CHECK = {
     "kind": "expect",
@@ -92,6 +123,51 @@ def test_baseline_is_the_latest_completed_run_with_the_same_ai_mode(store, clock
     assert store.latest_eval_run("s", mock=True).id == "ev_00000001"
     assert store.latest_eval_run("s", mock=False).id == "ev_00000002"
     assert store.latest_eval_run("other", mock=False) is None
+
+
+def test_running_eval_without_a_recent_heartbeat_is_stale(store, clock):
+    """Review finding: a killed eval stayed "running" forever, with no liveness signal."""
+    record = make_eval(store)
+    assert record.heartbeat_at == clock.now()
+    assert not store.is_eval_stale(record, timeout=30)
+    clock.advance(31)
+    assert store.is_eval_stale(store.get_eval_run(record.id), timeout=30)
+    store.eval_heartbeat(record.id)
+    assert store.get_eval_run(record.id).heartbeat_at == clock.now()
+    assert not store.is_eval_stale(store.get_eval_run(record.id), timeout=30)
+    done = store.finish_eval_run(record.id, status="completed")
+    clock.advance(100)
+    assert not store.is_eval_stale(done, timeout=30)
+
+
+def test_stale_running_evals_of_a_suite_are_marked_abandoned(store, clock):
+    killed = make_eval(store, "ev_00000001")
+    make_eval(store, "ev_00000002", suite="other")
+    clock.advance(60)
+    make_eval(store, "ev_00000003")  # alive: its heartbeat is recent
+    assert store.abandon_stale_eval_runs("s", timeout=30) == ["ev_00000001"]
+    abandoned = store.get_eval_run("ev_00000001")
+    assert abandoned.status == "errored" and abandoned.error.startswith("abandoned")
+    assert abandoned.ended_at == killed.heartbeat_at  # when it was last known to be alive
+    assert store.get_eval_run("ev_00000002").status == "running"
+    assert store.get_eval_run("ev_00000003").status == "running"
+    assert store.abandon_stale_eval_runs("s", timeout=30) == []
+
+
+def test_databases_from_before_the_heartbeat_column_are_migrated(tmp_path, clock):
+    path = tmp_path / "old.db"
+    conn = sqlite3.connect(path)
+    conn.executescript(EVAL_RUNS_BEFORE_HEARTBEAT)
+    conn.close()
+    with Store(path, clock=clock) as store:
+        record = store.get_eval_run("ev_00000001")
+        assert record.heartbeat_at is None and record.status == "running"
+        clock.advance(31)
+        assert store.is_eval_stale(record, timeout=30)  # no heartbeat: judged by its start
+        store.eval_heartbeat("ev_00000001")
+        assert store.get_eval_run("ev_00000001").heartbeat_at == clock.now()
+    with Store(path, clock=clock) as store:  # opening a migrated database again is a no-op
+        assert store.get_eval_run("ev_00000001").heartbeat_at == clock.now()
 
 
 def test_unknown_eval_run_is_not_found(store):
