@@ -11,7 +11,38 @@ from cerebellum.errors import StepError
 from cerebellum.spec.expressions import render
 from cerebellum.steps.base import StepRuntime, elapsed_ms
 
-_READ = re.compile(r"^\s*(select|with|show|explain|values|pragma)\b", re.I)
+_READ_STATEMENTS = frozenset({"select", "show", "explain", "values", "pragma"})
+_MAIN_STATEMENTS = _READ_STATEMENTS | {"insert", "update", "delete", "merge", "replace"}
+# One SQL token: whitespace or a comment, quoted text, a word, a parenthesis or anything else.
+_SQL_TOKEN = re.compile(
+    r"""
+    \s+ | --[^\n]* | /\*.*?\*/
+    | '(?:[^']|'')*' | "(?:[^"]|"")*" | \$(?P<tag>(?:[A-Za-z_]\w*)?)\$.*?\$(?P=tag)\$
+    | (?P<word>[A-Za-z_]\w*) | (?P<paren>[()]) | .
+    """,
+    re.S | re.X,
+)
+
+
+def returns_rows(sql: str) -> bool:
+    """Whether a statement produces rows: a read, or a write with a RETURNING clause.
+
+    Only top-level words count: comments, quoted text and anything in parentheses (CTE bodies,
+    subqueries) are skipped, and a WITH clause is looked past to the statement it introduces.
+    """
+    words: list[str] = []
+    depth = 0
+    for token in _SQL_TOKEN.finditer(sql):
+        if token["paren"]:
+            depth += 1 if token["paren"] == "(" else -1
+        elif token["word"] and depth == 0:
+            words.append(token["word"].lower())
+    if not words:
+        return False
+    verb = words[0]
+    if verb == "with":
+        verb = next((word for word in words[1:] if word in _MAIN_STATEMENTS), "select")
+    return verb in _READ_STATEMENTS or "returning" in words
 
 
 async def run_query(rt: StepRuntime) -> Any:
@@ -22,7 +53,7 @@ async def run_query(rt: StepRuntime) -> Any:
         raise StepError(
             f"connector {step.connector!r} is not a SQL connector", retryable=False, kind="config"
         )
-    reading = bool(_READ.match(step.sql))
+    reading = returns_rows(step.sql)
     trace = {
         "connector": step.connector,
         "operation": "query" if reading else "execute",
