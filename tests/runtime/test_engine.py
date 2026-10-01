@@ -93,14 +93,23 @@ async def test_retry_then_success(store, settings, clock, tmp_path):
 def test_a_run_records_where_its_rest_connectors_point_without_credentials(
     store, settings, tmp_path
 ):
-    """The URLs a run's REST connectors resolved to when it started (later hints use them:
-    the environment may differ by then), with user, password, query and fragment removed."""
-    text = API_YAML.replace(
-        'base_url: "http://api.test"', 'base_url: "https://user:pw@api.test:8443/v1?token=x#f"'
-    )
-    run = engine_for(store, settings).prepare(wf(text, tmp_path), {"order_id": "A1"})
-    [started] = [e for e in store.get_events(run.run_id) if e.type == "run.started"]
-    assert started.data["rest_urls"] == {"api": "https://api.test:8443/v1"}
+    """The servers a run's REST connectors resolved to when it started (later hints use them:
+    the environment may differ by then): scheme, host and port only, since a user, password,
+    path or query may carry secrets. Review finding: a path secret (a webhook URL) and a
+    password with an unencoded '/' were stored."""
+    cases = {
+        "https://user:pw@API.test:8443/v1?token=x#f": "https://api.test:8443",
+        "https://hooks.example/services/T0/B0/XXXXSECRET": "https://hooks.example",
+        "http://[::1]:8787/": "http://[::1]:8787",
+        "https://user:p/w0rd@host.example/p": None,  # not parsed as a password: not recorded
+        "https://user:1234/x@host.example/p": None,
+    }
+    for url, recorded in cases.items():
+        text = API_YAML.replace('base_url: "http://api.test"', f'base_url: "{url}"')
+        run = engine_for(store, settings).prepare(wf(text, tmp_path), {"order_id": "A1"})
+        [started] = [e for e in store.get_events(run.run_id) if e.type == "run.started"]
+        expected = {} if recorded is None else {"api": recorded}
+        assert started.data["rest_urls"] == expected, url
 
 
 async def test_non_retryable_failure_cancels_downstream(store, settings, clock, tmp_path):

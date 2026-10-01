@@ -11,7 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -62,13 +62,23 @@ def _span(step_id: str, attempt: int) -> str:
 
 
 def rest_urls(workflow: Workflow) -> dict[str, str]:
-    """Where `workflow`'s REST connectors point, without user, password, query or fragment."""
+    """The server each of `workflow`'s REST connectors points at: scheme, host and port only,
+    since a user, password, path or query may carry secrets (and telling servers apart needs
+    none of them). A URL with an '@' outside its parsed user part (an unencoded '/' in a
+    password) is left out rather than risk recording part of the password."""
     urls: dict[str, str] = {}
     for name, spec in workflow.connectors.items():
-        if spec.type == "rest":
-            parts = urlsplit(spec.base_url)
-            netloc = parts.netloc.rpartition("@")[2]
-            urls[name] = urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+        if spec.type != "rest":
+            continue
+        parts = urlsplit(spec.base_url)
+        try:
+            port = parts.port
+        except ValueError:  # not a usable URL: the step will say so
+            continue
+        if "@" in parts.path + parts.query + parts.fragment or not parts.hostname:
+            continue
+        host = f"[{parts.hostname}]" if ":" in parts.hostname else parts.hostname
+        urls[name] = f"{parts.scheme}://{host}" + (f":{port}" if port is not None else "")
     return urls
 
 
