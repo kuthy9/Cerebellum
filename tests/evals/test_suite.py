@@ -2,6 +2,7 @@ import pytest
 
 from cerebellum.errors import SpecError
 from cerebellum.evals import load_suite
+from cerebellum.evals.suite import path_problem
 from cerebellum.templates import template_path
 
 SUITE = template_path("refund") / "evals.yaml"
@@ -78,6 +79,21 @@ cases:
     assert "unknown step 'nope'" in issues["cases[0].expect.steps.nope.status"]
     assert "duplicate case id" in issues["cases[1].id"]
     assert issues["cases[1].input.amount"] == "is required"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "output.",
+        "output..decision",
+        "steps.fetch_order..status",
+        "steps.fetch_order.output..status",
+        "steps.fetch_order.output.",
+        ".status",
+    ],
+)
+def test_expect_paths_with_empty_segments_are_rejected(path):
+    assert path_problem(path, {"fetch_order"}) == "has an empty segment"
 
 
 def test_suite_structure_errors_use_yaml_paths(tmp_path):

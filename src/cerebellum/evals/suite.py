@@ -131,7 +131,9 @@ def suite_issues(suite: EvalSuite, workflow: Workflow) -> list[SpecIssue]:
 
 def path_problem(path: str, step_ids: Collection[str]) -> str | None:
     """Why an `expect` path can never resolve, or None when it is well formed."""
-    root, *rest = path.split(".")
+    root, *rest = segments = path.split(".")
+    if "" in segments:
+        return "has an empty segment"
     if root not in PATH_ROOTS:
         return f"unknown path {root!r}; paths start with one of: {', '.join(PATH_ROOTS)}"
     if root in ("status", "error"):
