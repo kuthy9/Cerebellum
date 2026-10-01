@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import math
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -65,9 +66,9 @@ class Pricing:
                 pricing.prices[model] = _model_price(entry)
             except (KeyError, TypeError, ValueError) as exc:
                 raise ConfigError(
-                    f"{where}: {model!r} needs numeric input and output prices per million "
-                    'tokens (optional: cache_read, cache_write), e.g. {"input": 4.0, '
-                    '"output": 20.0}'
+                    f"{where}: {model!r} needs non-negative numeric input and output prices "
+                    "per million tokens (optional: cache_read, cache_write), e.g. "
+                    '{"input": 4.0, "output": 20.0}'
                 ) from exc
         return pricing
 
@@ -76,17 +77,27 @@ class Pricing:
         return price.cost(usage) if price else 0.0
 
 
+def _price(value: Any) -> float:
+    """A JSON number that is finite and not negative; booleans and strings are not prices."""
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise TypeError(f"a price must be a JSON number, not {value!r}")
+    price = float(value)
+    if not math.isfinite(price) or price < 0:
+        raise ValueError(f"a price must be finite and not negative, not {value!r}")
+    return price
+
+
 def _model_price(entry: Any) -> ModelPrice:
     if not isinstance(entry, dict):
         raise TypeError("a model's prices must be a JSON object")
 
     def optional(key: str) -> float | None:
         value = entry.get(key)
-        return None if value is None else float(value)
+        return None if value is None else _price(value)
 
     return ModelPrice(
-        float(entry["input"]),
-        float(entry["output"]),
+        _price(entry["input"]),
+        _price(entry["output"]),
         optional("cache_read"),
         optional("cache_write"),
     )

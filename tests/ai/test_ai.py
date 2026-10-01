@@ -60,6 +60,17 @@ def test_pricing_file_override(tmp_path):
         ('{"m": {"output": 2}}', "'m' needs"),
         ('{"m": {"input": "cheap", "output": 2}}', "'m' needs"),
         ('{"m": {"input": 1, "output": 2, "cache_read": "x"}}', "'m' needs"),
+        # Review finding: booleans (float(True) == 1.0), numeric strings, NaN, infinities and
+        # negative numbers were accepted as prices.
+        ('{"m": {"input": true, "output": 2}}', "'m' needs"),
+        ('{"m": {"input": 1, "output": 2, "cache_read": false}}', "'m' needs"),
+        ('{"m": {"input": "4.0", "output": 2}}', "'m' needs"),
+        ('{"m": {"input": NaN, "output": 2}}', "'m' needs"),
+        ('{"m": {"input": 1, "output": Infinity}}', "'m' needs"),
+        ('{"m": {"input": 1, "output": 2, "cache_write": -Infinity}}', "'m' needs"),
+        ('{"m": {"input": 1e400, "output": 2}}', "'m' needs"),
+        ('{"m": {"input": -1, "output": 2}}', "'m' needs"),
+        ('{"m": {"input": 1, "output": 2, "cache_read": -0.5}}', "'m' needs"),
     ],
 )
 def test_a_bad_pricing_file_is_a_config_error(tmp_path, content, problem):
