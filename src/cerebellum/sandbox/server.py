@@ -54,8 +54,9 @@ def _port_in_use(host: str, port: int) -> bool:
 
 
 def sandbox_url(host: str, port: int) -> str:
-    """The base URL of the sandbox payments API on `host`:`port` (what start_sandbox serves)."""
-    return f"http://{host}:{port}"
+    """The base URL of the sandbox payments API on `host`:`port` (what start_sandbox serves);
+    an IPv6 address goes in brackets."""
+    return f"http://[{host}]:{port}" if ":" in host else f"http://{host}:{port}"
 
 
 def start_sandbox(host: str, port: int, fail: str = "never") -> SandboxHandle:

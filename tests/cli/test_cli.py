@@ -441,6 +441,17 @@ def test_a_param_nested_too_deeply_is_refused(runner, depth):
     assert "no runs yet" in invoke(runner, "runs").text
 
 
+def test_a_param_too_deep_to_parse_is_not_called_json(runner):
+    """Review finding: a value that only starts like JSON (20000 brackets, then text) was
+    refused as "its JSON value is nested ...", though it is not JSON at all."""
+    small = f"@{INPUTS / 'small.json'}"
+    value = "[" * 20000 + "]" * 20000 + "x"
+    result = invoke(runner, "run", WORKFLOW, "-i", small, "-p", f"approval_threshold={value}")
+    assert result.exit_code == 2, result.text[-500:]
+    assert "invalid --param approval_threshold: its value is nested more than" in result.text
+    assert "JSON" not in result.text
+
+
 @pytest.mark.parametrize("command", ["validate", "show", "run"])
 def test_a_workflow_nested_too_deeply_is_invalid(runner, tmp_path, command):
     flow = tmp_path / "deep.yaml"
@@ -727,6 +738,47 @@ def test_a_server_that_cannot_start_exits_1(runner, free_port, command, what):
     assert result.exit_code == 1, result.text
     assert isinstance(result.exception, SystemExit)
     assert f"the {what} could not start on 127.0.0.1:{free_port}" in result.text, result.text
+
+
+@pytest.mark.parametrize("bad", ["a..b", "a" * 64])
+@pytest.mark.parametrize("source", ["flag", "env"])
+@pytest.mark.parametrize(
+    ("command", "variable"),
+    [
+        (("ui", "--no-sandbox", "--mock"), "CEREBELLUM_UI_HOST"),
+        (("sandbox",), "CEREBELLUM_SANDBOX_HOST"),
+    ],
+)
+def test_a_bind_host_that_is_not_a_host_name_is_refused(
+    runner, monkeypatch, command, variable, source, bad
+):
+    """Review finding: a host Python cannot encode (an empty or 64-character label) raised
+    UnicodeError while binding: a traceback (after the no-authentication warning for ui)."""
+    calls = fake_server(monkeypatch)
+    sandbox_calls = fake_sandbox_server(monkeypatch)
+    args = list(command)
+    if source == "env":
+        monkeypatch.setenv(variable, bad)
+    else:
+        args += ["--host", bad]
+    result = invoke(runner, *args)
+    assert result.exit_code == (2 if source == "flag" else 1), result.text
+    assert isinstance(result.exception, SystemExit), result.exception
+    origin = "--host" if source == "flag" else variable
+    assert f"{origin} {bad!r} is not a valid host name" in result.text, result.text
+    assert "no authentication" not in result.text
+    assert calls == {} and sandbox_calls == {}
+
+
+@pytest.mark.parametrize("host", ["a..b", "::1"])
+def test_a_sandbox_host_that_cannot_be_used_is_a_clear_error(runner, monkeypatch, host):
+    """Review finding: a CEREBELLUM_SANDBOX_HOST the sandbox's port check could not use (a
+    name that does not resolve, an IPv6 address) ended `run --sandbox` in a traceback."""
+    monkeypatch.setenv("CEREBELLUM_SANDBOX_HOST", host)
+    result = invoke(runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'small.json'}", "--sandbox")
+    assert result.exit_code in (1, 2), result.text
+    assert isinstance(result.exception, SystemExit), result.exception
+    assert "CEREBELLUM_SANDBOX_HOST" in result.text and "Traceback" not in result.text
 
 
 @pytest.mark.parametrize("source", ["flag", "env"])

@@ -222,13 +222,33 @@ def _exit_code(status: RunStatus) -> int:
     return EXIT_OK
 
 
-def _start_sandbox(settings: Settings, fail: str) -> SandboxHandle:
+def _bind_host(flag: str | None, configured: str, variable: str) -> str:
+    """The host a server binds to: --host (trimmed; blank means `variable`'s setting), checked
+    before anything starts. A name Python cannot encode (an empty or over-long label) would
+    otherwise fail inside the server's bind as a UnicodeError traceback."""
+    given = (flag or "").strip()
+    host = given or configured
     try:
-        return start_sandbox(settings.sandbox_host, settings.sandbox_port, fail)
+        host.encode("idna")
+    except UnicodeError:
+        origin, code = ("--host", EXIT_INVALID) if given else (variable, 1)
+        _fail(f"{origin} {host!r} is not a valid host name", code)
+    return host
+
+
+def _start_sandbox(settings: Settings, fail: str) -> SandboxHandle:
+    host = _bind_host(None, settings.sandbox_host, "CEREBELLUM_SANDBOX_HOST")
+    try:
+        return start_sandbox(host, settings.sandbox_port, fail)
     except ValueError as exc:
         _fail(str(exc), EXIT_INVALID)
     except CerebellumError as exc:
         _fail(str(exc))
+    except OSError as exc:  # its port check cannot use the host (unresolved, IPv6)
+        _fail(
+            f"cannot start the sandbox payments API on {host}:{settings.sandbox_port} "
+            f"(CEREBELLUM_SANDBOX_HOST): {exc}"
+        )
 
 
 def _draft_provider(settings: Settings) -> AIProvider:
@@ -357,8 +377,8 @@ def _parse_params(items: list[str]) -> dict[str, Any]:
             _fail(f"invalid --param {item!r}; use key=value", EXIT_INVALID)
         try:
             params[key.strip()] = _param_value(value)
-        except RecursionError:  # JSON, so not kept as text: refused like any too-deep value
-            _fail(f"invalid --param {key.strip()}: its JSON value {TOO_DEEP}", EXIT_INVALID)
+        except RecursionError:  # too deep to tell whether it is JSON: refused, not kept as text
+            _fail(f"invalid --param {key.strip()}: its value {TOO_DEEP}", EXIT_INVALID)
     return params
 
 
@@ -917,7 +937,7 @@ def sandbox(
         mode = FailMode.parse(fail)
     except ValueError as exc:
         _fail(str(exc), EXIT_INVALID)
-    bind_host = (host or "").strip() or settings.sandbox_host  # as CEREBELLUM_SANDBOX_HOST
+    bind_host = _bind_host(host, settings.sandbox_host, "CEREBELLUM_SANDBOX_HOST")
     bind_port = settings.sandbox_port if port is None else port
     console.print(
         render.header("sandbox payments API", f"http://{bind_host}:{bind_port} · fail mode {mode}")
@@ -952,7 +972,7 @@ def ui(
 ) -> None:
     """Serve the dashboard: live runs, traces, approvals, tasks and workflows."""
     settings = _settings()
-    bind_host = (host or "").strip() or settings.ui_host  # as CEREBELLUM_UI_HOST
+    bind_host = _bind_host(host, settings.ui_host, "CEREBELLUM_UI_HOST")
     bind_port = settings.ui_port if port is None else port
     # Bound to this machine only (under any spelling of loopback): answer only requests
     # addressed to it, against DNS rebinding. Otherwise anyone who can reach it may use it.
