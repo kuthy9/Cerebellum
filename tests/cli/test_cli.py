@@ -9,6 +9,7 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from cerebellum.cli import app as cli
+from cerebellum.cli import render
 from cerebellum.config import DEFAULT_UI_SHUTDOWN_GRACE_SECONDS
 from cerebellum.evals import load_suite
 from cerebellum.sandbox.server import sandbox_running
@@ -280,3 +281,8 @@ def test_ui_beyond_this_machine_accepts_any_host_name(runner, monkeypatch):
     assert invoke(runner, "ui", "--host", "0.0.0.0", "--no-sandbox", "--mock").exit_code == 0
     client = TestClient(calls["app"], base_url="http://192.168.1.5:7400")
     assert client.get("/api/info").status_code == 200
+
+
+def test_trace_does_not_draw_spans_closed_by_a_reset_or_cancel_as_running():
+    for status in ("interrupted", "cancelled"):
+        assert render.SPAN_STYLES.get(status, render.ACCENT) != render.ACCENT

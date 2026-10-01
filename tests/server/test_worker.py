@@ -79,6 +79,21 @@ async def test_deciding_twice_conflicts(worker, store, wf):
     assert store.list_runs()[0].status is RunStatus.REJECTED
 
 
+async def test_deciding_after_the_deadline_conflicts_and_the_run_follows_on_timeout(
+    worker, store, clock, wf
+):
+    record = worker.start_run(wf, {"amount": 900})
+    await worker.drain()
+    [pending] = store.list_approvals(status="pending")
+    clock.advance(3601)
+    with pytest.raises(CerebellumError, match="expired") as info:
+        await worker.decide(pending.id, approved=True, by="ui-user")
+    assert not isinstance(info.value, NotFound)
+    await worker.drain()
+    assert store.get_approval(pending.id).decided_by == "system"
+    assert store.get_run(record.run_id).status is RunStatus.REJECTED
+
+
 async def test_unknown_ids_are_not_found(worker):
     with pytest.raises(NotFound):
         await worker.decide("ap_missing", approved=True, by="x")

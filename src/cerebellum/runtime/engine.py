@@ -18,6 +18,7 @@ from cerebellum.ai.base import AIProvider
 from cerebellum.config import Settings
 from cerebellum.connectors import ConnectorEnv, ConnectorPool
 from cerebellum.errors import (
+    ApprovalExpired,
     BudgetExceeded,
     CerebellumError,
     LeaseUnavailable,
@@ -168,7 +169,14 @@ class Engine:
             raise CerebellumError(
                 f"run {run_id} has several pending approvals ({names}); specify the step"
             )
-        self.store.decide_approval(matches[0].id, approved=approved, by=by, comment=comment)
+        try:
+            self.store.decide_approval(matches[0].id, approved=approved, by=by, comment=comment)
+        except ApprovalExpired:
+            # on_timeout decided it instead; continue the run from that outcome, then report it.
+            if resume:
+                with contextlib.suppress(LeaseUnavailable):
+                    await self.resume(run_id)
+            raise
         if not resume:
             return self.store.get_run(run_id)
         try:
@@ -180,7 +188,9 @@ class Engine:
     async def expire_due_approvals(self) -> list[str]:
         """Apply on_timeout to overdue approvals and resume their runs."""
         now = self.clock.now()
-        resumed: list[str] = []
+        # Decide them all before resuming anything: a resume would itself expire the run's other
+        # overdue approvals, and deciding those again afterwards fails.
+        due: dict[str, None] = {}  # run ids, in order, without duplicates
         for approval in self.store.list_approvals(status="pending"):
             if approval.expires_at is None or approval.expires_at > now:
                 continue
@@ -193,11 +203,12 @@ class Engine:
                 comment="approval timed out",
                 expired=True,
             )
-            if approval.run_id in resumed:
-                continue
+            due[approval.run_id] = None
+        resumed: list[str] = []
+        for run_id in due:
             try:
-                await self.resume(approval.run_id)
-                resumed.append(approval.run_id)
+                await self.resume(run_id)
+                resumed.append(run_id)
             except LeaseUnavailable:
                 pass
         return resumed
@@ -224,6 +235,9 @@ class Engine:
                 )
             self._reset_for_resume(run_id, run.status)
             await _Execution(self, run_id, workflow, pool).run()
+        except Exception as exc:  # not cancellation: a stopped drive leaves the run interrupted
+            self._record_failure(run_id, exc)
+            raise
         finally:
             heartbeat.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -237,6 +251,27 @@ class Engine:
         while True:
             await asyncio.sleep(interval)
             self.store.renew_lease(run_id, self.owner, self.settings.lease_seconds)
+
+    def _record_failure(self, run_id: str, exc: Exception) -> None:
+        """An unexpected engine error ended the drive: cancel the steps it left in flight and fail
+        the run, which can be resumed once the cause is fixed."""
+        error = f"engine error: {type(exc).__name__}: {exc}"
+        try:
+            for record in self.store.get_steps(run_id).values():
+                if record.status in STEP_ACTIVE:
+                    self.store.step_transition(
+                        run_id,
+                        record.step_id,
+                        S.CANCELLED,
+                        event="cancelled",
+                        data={"reason": error},
+                    )
+            if self.store.get_run(run_id).status is R.RUNNING:
+                self.store.set_run_status(
+                    run_id, R.FAILED, event="failed", error=error, data={"kind": "internal"}
+                )
+        except Exception as record_exc:  # the store may be what broke; keep the original error
+            exc.add_note(f"recording the failure failed: {type(record_exc).__name__}: {record_exc}")
 
     def _reset_for_resume(self, run_id: str, previous: RunStatus) -> None:
         for record in self.store.get_steps(run_id).values():
@@ -280,6 +315,17 @@ class _Execution:
 
     async def run(self) -> None:
         running: dict[str, asyncio.Task[None]] = {}
+        try:
+            await self._schedule(running)
+        except BaseException:
+            # An unexpected error, or the drive itself was cancelled: no step may outlive the drive,
+            # whose lease, heartbeat and connector pool end with it.
+            for task in running.values():
+                task.cancel()
+            await asyncio.gather(*running.values(), return_exceptions=True)
+            raise
+
+    async def _schedule(self, running: dict[str, asyncio.Task[None]]) -> None:
         for failed_step, fallback_id, error in self._interrupted_fallbacks():
             self.recovering.add(failed_step)
             running[failed_step] = asyncio.create_task(

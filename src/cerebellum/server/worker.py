@@ -14,7 +14,7 @@ import httpx
 from cerebellum.ai.base import AIProvider
 from cerebellum.ai.mock import MockProvider
 from cerebellum.config import Settings
-from cerebellum.errors import CerebellumError, LeaseUnavailable
+from cerebellum.errors import ApprovalExpired, CerebellumError, LeaseUnavailable
 from cerebellum.runtime.clock import Clock
 from cerebellum.runtime.engine import Engine, refuse_eval_run
 from cerebellum.runtime.states import RUN_RESUMABLE
@@ -88,9 +88,18 @@ class Worker:
             raise CerebellumError(f"approval {approval_id} is already {approval.status}")
         run = self.store.get_run(approval.run_id)
         engine = self.engine(mock=run.mock)
-        await engine.decide(
-            run.run_id, approval.step_id, approved=approved, by=by, comment=comment, resume=False
-        )
+        try:
+            await engine.decide(
+                run.run_id,
+                approval.step_id,
+                approved=approved,
+                by=by,
+                comment=comment,
+                resume=False,
+            )
+        except ApprovalExpired:
+            self._spawn(engine.resume(run.run_id))  # the run continues from on_timeout instead
+            raise
         # If another process drives the run, this resume yields (LeaseUnavailable) and that
         # process applies the decision before it would suspend.
         self._spawn(engine.resume(run.run_id))

@@ -96,7 +96,8 @@ class SqliteSandboxConnector(SqlConnector):
     async def close(self) -> None:
         if self._conn is not None:
             conn, self._conn = self._conn, None
-            await asyncio.to_thread(conn.close)
+            async with self._lock:  # an abandoned operation may still be using it
+                await asyncio.to_thread(conn.close)
 
     async def query(self, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
         def op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
@@ -116,16 +117,23 @@ class SqliteSandboxConnector(SqlConnector):
     async def _run(self, op: Callable[[sqlite3.Connection], T]) -> T:
         await self.open()
         assert self._conn is not None
-        async with self._lock:
-            try:
-                return await asyncio.to_thread(op, self._conn)
-            except sqlite3.OperationalError as exc:
-                transient = "locked" in str(exc) or "busy" in str(exc)
-                raise ConnectorError(
-                    f"sqlite error: {exc}", retryable=transient, kind="sql"
-                ) from exc
-            except sqlite3.Error as exc:
-                raise ConnectorError(f"sqlite error: {exc}", retryable=False, kind="sql") from exc
+        await self._lock.acquire()
+        # Held until the thread finishes, not until the caller stops waiting: a step timeout
+        # cancels the caller, but the thread goes on using the shared connection.
+        work = asyncio.ensure_future(asyncio.to_thread(op, self._conn))
+        work.add_done_callback(self._release)
+        try:
+            return await asyncio.shield(work)
+        except sqlite3.OperationalError as exc:
+            transient = "locked" in str(exc) or "busy" in str(exc)
+            raise ConnectorError(f"sqlite error: {exc}", retryable=transient, kind="sql") from exc
+        except sqlite3.Error as exc:
+            raise ConnectorError(f"sqlite error: {exc}", retryable=False, kind="sql") from exc
+
+    def _release(self, work: asyncio.Future[Any]) -> None:
+        self._lock.release()
+        if not work.cancelled():
+            work.exception()  # an abandoned operation's error has nobody left to report to
 
     async def health(self) -> HealthStatus:
         started = time.perf_counter()

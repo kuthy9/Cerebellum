@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
-from cerebellum.errors import CerebellumError, NotFound, RunNotFound
+from cerebellum.errors import ApprovalExpired, CerebellumError, NotFound, RunNotFound
 from cerebellum.runtime.clock import Clock, SystemClock
 from cerebellum.runtime.states import (
     RUN_TERMINAL,
@@ -494,10 +494,13 @@ class Store:
             tx = _Tx(self._conn, self.clock.now())
             try:
                 yield tx
+                self._conn.execute("COMMIT")
             except BaseException:
-                self._conn.execute("ROLLBACK")
+                # Also when COMMIT itself failed (e.g. SQLITE_BUSY): SQLite then keeps the
+                # transaction open. Some errors have already rolled it back.
+                if self._conn.in_transaction:
+                    self._conn.execute("ROLLBACK")
                 raise
-            self._conn.execute("COMMIT")
         for event in tx.events:
             for listener in list(self._listeners):
                 try:
@@ -803,6 +806,10 @@ class Store:
         comment: str = "",
         expired: bool = False,
     ) -> ApprovalRecord:
+        """Record a decision. One that arrives after the deadline loses to it: on_timeout is
+        applied (as approval.expired, by system), and once that is committed ApprovalExpired tells
+        the caller."""
+        late = False
         with self._tx() as tx:
             rows = tx.execute("SELECT * FROM approvals WHERE id=?", (approval_id,)).fetchall()
             if not rows:
@@ -810,6 +817,10 @@ class Store:
             row = rows[0]
             if row["status"] != "pending":
                 raise CerebellumError(f"approval {approval_id} is already {row['status']}")
+            if not expired and row["expires_at"] is not None and row["expires_at"] <= tx.now:
+                late = expired = True
+                approved = row["on_timeout"] == "approve"
+                by, comment = "system", "approval timed out"
             status = "approved" if approved else "rejected"
             tx.execute(
                 "UPDATE approvals SET status=?, decided_at=?, decided_by=?, comment=? WHERE id=?",
@@ -826,6 +837,11 @@ class Store:
                     "by": by,
                     "comment": comment,
                 },
+            )
+        if late:
+            raise ApprovalExpired(
+                f"approval {approval_id} expired before this decision; on_timeout "
+                f"({row['on_timeout']}) was applied and it is now {status}"
             )
         return self.get_approval(approval_id)
 

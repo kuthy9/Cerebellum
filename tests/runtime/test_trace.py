@@ -86,3 +86,25 @@ def test_build_spans_pairs_attempts_and_nests_calls():
     assert gate.status == "waiting" and gate.end is None
     assert llm.kind == "llm" and llm.start == pytest.approx(3.25)
     assert sql.kind == "connector" and sql.start == sql.end == 4.0
+
+
+def test_reset_and_cancel_close_the_open_attempt():
+    """Reset (resume after a crash) and cancel events name the step, not the attempt's span."""
+    events = [
+        ev(1, "step.started", 1.0, "pay", "pay#1", attempt=1),
+        ev(2, "step.started", 1.0, "notify", "notify#1", attempt=1),
+        ev(3, "step.started", 1.0, "check", "check#1", attempt=1),
+        ev(4, "step.failed", 1.5, "check", "check#1"),
+        ev(5, "step.cancelled", 2.0, "notify", None, reason="engine error"),
+        ev(6, "step.reset", 5.0, "pay", None, reason="interrupted"),
+        ev(7, "step.reset", 5.0, "check", None, reason="resume after failure"),
+        ev(8, "step.cancelled", 5.0, "audit", None, reason="upstream step 'check' failed"),
+        ev(9, "step.started", 5.0, "pay", "pay#2", attempt=2),
+        ev(10, "step.succeeded", 6.0, "pay", "pay#2"),
+    ]
+    spans = {span.span_id: span for span in build_spans(events)}
+    assert list(spans) == ["pay#1", "notify#1", "check#1", "pay#2"]
+    assert (spans["pay#1"].status, spans["pay#1"].end) == ("interrupted", 5.0)
+    assert (spans["notify#1"].status, spans["notify#1"].end) == ("cancelled", 2.0)
+    assert (spans["check#1"].status, spans["check#1"].end) == ("failed", 1.5)  # already closed
+    assert (spans["pay#2"].status, spans["pay#2"].end) == ("succeeded", 6.0)

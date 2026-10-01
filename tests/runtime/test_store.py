@@ -1,3 +1,4 @@
+import sqlite3
 import threading
 from datetime import date
 from decimal import Decimal
@@ -159,6 +160,28 @@ def test_expired_decision_uses_its_own_event(store, simple_workflow):
     assert store.get_events(run.run_id)[-1].type == "approval.expired"
 
 
+def test_human_decision_after_the_deadline_applies_on_timeout_instead(
+    store, simple_workflow, clock
+):
+    run = start(store, simple_workflow)
+    store.step_transition(run.run_id, "second", StepStatus.RUNNING, event="started", attempts=1)
+    approval = store.request_approval(
+        run.run_id,
+        "second",
+        title="t",
+        context={},
+        expires_at=clock.now() + 60,
+        on_timeout="reject",
+    )
+    clock.advance(60)
+    with pytest.raises(CerebellumError, match=f"approval {approval.id} expired"):
+        store.decide_approval(approval.id, approved=True, by="alice", comment="late")
+    decided = store.get_approval(approval.id)  # committed although the caller got an error
+    assert (decided.status, decided.decided_by) == ("rejected", "system")
+    last = store.get_events(run.run_id)[-1]
+    assert last.type == "approval.expired" and last.data["by"] == "system"
+
+
 def test_tasks_lifecycle(store, simple_workflow):
     run = start(store, simple_workflow)
     task = store.create_task(run.run_id, "rescue", title="Fix it", assignee="ops", payload={"a": 1})
@@ -230,6 +253,23 @@ def test_values_are_json_safe(store, simple_workflow):
     )
     assert store.get_events(run.run_id)[-1].data["amount"] == 12.5
     assert store.get_events(run.run_id)[-1].data["day"] == "2026-10-01"
+
+
+def test_failed_commit_rolls_back_and_frees_the_connection(store, simple_workflow):
+    """SQLite keeps the transaction open when COMMIT itself fails (SQLITE_BUSY, or as here a
+    deferred constraint); the shared connection must not be left inside it."""
+    conn = store._conn
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.execute("CREATE TABLE parent (id INTEGER PRIMARY KEY)")
+    conn.execute(
+        "CREATE TABLE child (pid INTEGER REFERENCES parent(id) DEFERRABLE INITIALLY DEFERRED)"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        with store._tx() as tx:
+            tx.execute("INSERT INTO child (pid) VALUES (1)")  # only checked at COMMIT
+    assert not conn.in_transaction
+    assert conn.execute("SELECT COUNT(*) FROM child").fetchone()[0] == 0
+    store.save_workflow(simple_workflow)  # the next write transaction starts normally
 
 
 def test_concurrent_writers_on_one_database(settings, simple_workflow):
