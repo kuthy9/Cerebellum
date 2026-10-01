@@ -28,6 +28,8 @@ from cerebellum.spec.schemas import schema_problems
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _CONNECTOR_TYPES = {"query": "postgres", "http": "rest"}
+# Workflow fields whose items are unions discriminated by `type`.
+_TAGGED_FIELDS = ("steps", "fallbacks", "connectors")
 
 
 def load_workflow(path: str | Path, *, env: Mapping[str, str] | None = None) -> Workflow:
@@ -60,7 +62,7 @@ def parse_workflow(
         workflow = Workflow.model_validate(data)
     except ValidationError as exc:
         raise SpecError(
-            [SpecIssue(issue_path(err["loc"]), err["msg"]) for err in exc.errors()]
+            [SpecIssue(issue_path(_untagged(err["loc"], data)), err["msg"]) for err in exc.errors()]
         ) from exc
 
     issues = semantic_issues(workflow)
@@ -82,6 +84,18 @@ def issue_path(loc: tuple[Any, ...]) -> str:
         else:
             out += f".{part}" if out else str(part)
     return out or "<root>"
+
+
+def _untagged(loc: tuple[Any, ...], data: dict[str, Any]) -> tuple[Any, ...]:
+    """Drop the union tag pydantic puts after a step or connector in an error location
+    (steps[0].query.sql -> steps[0].sql); a field that shares the tag's name is kept."""
+    if len(loc) < 3 or loc[0] not in _TAGGED_FIELDS:
+        return loc
+    try:
+        tag = data[loc[0]][loc[1]]["type"]
+    except (KeyError, IndexError, TypeError):
+        return loc
+    return (*loc[:2], *loc[3:]) if loc[2] == tag else loc
 
 
 def _interpolate(value: Any, env: Mapping[str, str], path: str, issues: list[SpecIssue]) -> Any:

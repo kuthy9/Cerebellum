@@ -124,6 +124,25 @@ def test_structural_error_has_a_path():
     assert any(issue.startswith("steps[0]") and "sql" in issue for issue in issues)
 
 
+def test_structural_error_paths_omit_the_union_tag():
+    def mutate(d):
+        del d["steps"][0]["sql"]
+        d["steps"][0]["query"] = "a field named like the tag"
+        d["steps"][2]["query"] = "not a mapping"
+        d["steps"][2]["query_typo"] = 1
+        del d["connectors"]["db"]["dsn"]
+        d["fallbacks"][0]["query"] = 1
+
+    issues = issues_of(variant(mutate))
+    assert "steps[0].sql: Field required" in issues
+    assert "steps[0].query: Extra inputs are not permitted" in issues
+    assert "steps[2].query: Input should be a valid dictionary" in issues
+    assert "steps[2].query_typo: Extra inputs are not permitted" in issues
+    assert "connectors.db.dsn: Field required" in issues
+    assert "fallbacks[0].query: Extra inputs are not permitted" in issues
+    assert not any(".query.sql" in i or ".http." in i or ".postgres." in i for i in issues)
+
+
 def test_duplicate_ids():
     text = variant(lambda d: d["fallbacks"].append({"id": "load", "type": "task", "title": "x"}))
     assert "fallbacks[1].id: duplicate step id 'load'" in issues_of(text)
