@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import shutil
+import sqlite3
 import threading
 import time
 import webbrowser
@@ -14,6 +15,7 @@ from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
+import click
 import typer
 import uvicorn
 from dotenv import load_dotenv
@@ -21,6 +23,7 @@ from rich.console import Console, RenderableType
 from rich.live import Live
 from rich.rule import Rule
 from rich.text import Text
+from typer.core import TyperGroup
 
 from cerebellum import __version__
 from cerebellum.ai import AnthropicProvider, select_provider
@@ -32,7 +35,7 @@ from cerebellum.cli.demo import run_scenarios
 from cerebellum.config import DEFAULT_EVAL_MIN_PASS, Settings, has_anthropic_credentials
 from cerebellum.connectors import ConnectorEnv, HealthStatus, create_connector
 from cerebellum.connectors.postgres import sandbox_db_path
-from cerebellum.errors import CerebellumError, LeaseUnavailable, SpecError, StepError
+from cerebellum.errors import CerebellumError, ConfigError, LeaseUnavailable, SpecError, StepError
 from cerebellum.evals import EvalRunner, LoadedSuite, load_suite
 from cerebellum.evals.targets import connector_targets
 from cerebellum.runtime.engine import Engine, load_run_workflow
@@ -47,11 +50,29 @@ from cerebellum.spec import load_workflow
 from cerebellum.spec.models import Workflow
 from cerebellum.templates import template_path
 
+
+class _CerebellumGroup(TyperGroup):
+    """Runs every command. An unusable configured file (ConfigError) or Cerebellum database
+    (sqlite3.Error) ends the command with a message and exit code 1 instead of a traceback."""
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except ConfigError as exc:
+            _fail(str(exc))
+        except sqlite3.Error as exc:
+            _fail(
+                f"cannot use the Cerebellum database {Settings.from_env().db_path}: {exc} "
+                "(check CEREBELLUM_HOME)"
+            )
+
+
 app = typer.Typer(
     name="cerebellum",
     help="Reliable, observable, recoverable business workflows.",
     no_args_is_help=True,
     add_completion=False,
+    cls=_CerebellumGroup,
 )
 tasks_app = typer.Typer(help="Manual task inbox (fallback hand-offs).")
 connectors_app = typer.Typer(help="Connector utilities.", no_args_is_help=True)
@@ -101,7 +122,10 @@ def main() -> None:
 
 def _settings() -> Settings:
     settings = Settings.from_env()
-    settings.ensure_home()
+    try:
+        settings.ensure_home()
+    except OSError as exc:
+        _fail(f"cannot create CEREBELLUM_HOME {settings.home}: {exc.strerror or exc}")
     return settings
 
 
@@ -807,6 +831,8 @@ def ui(
             )
         )
     choice = select_provider(settings, force_mock=mock)
+    # The server opens the database while it starts, where a failure is only logged: check here.
+    Store(settings.db_path).close()
     shown = "127.0.0.1" if bind_host in ("0.0.0.0", "::") else bind_host
     url = f"http://[{shown}]:{bind_port}" if ":" in shown else f"http://{shown}:{bind_port}"
     with _sandbox(settings, "never", enabled=not no_sandbox):

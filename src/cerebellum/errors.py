@@ -27,6 +27,10 @@ class SpecError(CerebellumError):
         super().__init__("; ".join(str(issue) for issue in issues))
 
 
+class ConfigError(CerebellumError):
+    """A configured file or setting (for example CEREBELLUM_PRICING_FILE) is unusable."""
+
+
 class TemplateError(CerebellumError):
     """An expression or template could not be compiled or rendered."""
 

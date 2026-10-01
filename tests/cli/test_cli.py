@@ -318,6 +318,50 @@ def test_status_shows_a_run_whose_connector_variables_are_unset(runner, tmp_path
     assert invoke(runner, "approvals").text.count(run_id) == 1  # still pending
 
 
+def test_a_bad_pricing_file_is_a_clear_error(runner, tmp_path, monkeypatch):
+    """Review finding: a bad CEREBELLUM_PRICING_FILE ended the CLI with a traceback."""
+    monkeypatch.delenv("CEREBELLUM_MOCK")
+    monkeypatch.setattr("cerebellum.ai.has_anthropic_credentials", lambda *args, **kw: True)
+    prices = tmp_path / "prices.json"
+    prices.write_text("{oops", encoding="utf-8")
+    monkeypatch.setenv("CEREBELLUM_PRICING_FILE", str(prices))
+    result = invoke(runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'small.json'}")
+    assert result.exit_code == 1, result.text
+    assert isinstance(result.exception, SystemExit)  # handled, not a traceback
+    assert "CEREBELLUM_PRICING_FILE" in result.text and "not valid JSON" in result.text
+
+
+def test_a_corrupt_database_is_a_clear_error(runner, tmp_path, monkeypatch):
+    """Review finding: sqlite errors (corrupt or unwritable CEREBELLUM_HOME) were tracebacks."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "cerebellum.db").write_bytes(b"this is not a sqlite database" * 100)
+    fake_server(monkeypatch)  # the dashboard checks its database before it serves
+    for command in (("runs",), ("status", "r_00000000"), ("ui", "--no-sandbox", "--mock")):
+        result = invoke(runner, *command)
+        assert result.exit_code == 1, result.text
+        assert isinstance(result.exception, SystemExit)
+        assert str(home / "cerebellum.db") in result.text and "not a database" in result.text
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_an_unwritable_home_is_a_clear_error(runner, tmp_path, monkeypatch):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        monkeypatch.setenv("CEREBELLUM_HOME", str(locked))
+        result = invoke(runner, "runs")
+        assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.text
+        assert str(locked / "cerebellum.db") in result.text
+        monkeypatch.setenv("CEREBELLUM_HOME", str(locked / "home"))
+        result = invoke(runner, "runs")
+        assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.text
+        assert "CEREBELLUM_HOME" in result.text and str(locked / "home") in result.text
+    finally:
+        locked.chmod(0o700)
+
+
 def test_runs_rejects_unknown_status(runner):
     result = invoke(runner, "runs", "--status", "bogus")
     assert result.exit_code == 2 and "waiting_approval" in result.text
