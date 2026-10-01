@@ -173,6 +173,24 @@ async def test_a_claude_run_is_never_continued_on_mock_ai(worker, store, setting
     assert store.get_run(run.run_id).status is RunStatus.WAITING_APPROVAL
 
 
+async def test_the_sweep_says_once_why_a_claude_run_keeps_its_overdue_approval(
+    worker, store, settings, clock, wf, caplog
+):
+    """Review finding: on mock AI the sweep skipped overdue approvals of Claude runs on every
+    pass without a word, so their on_timeout silently never applied."""
+    run = await Engine(store, settings, FakeClaude()).start(wf, {"amount": 900})
+    with caplog.at_level(logging.INFO, logger="cerebellum.server.worker"):
+        assert worker.sweep() == []  # not overdue yet: nothing to say
+        clock.advance(3601)
+        for _ in range(3):
+            assert worker.sweep() == []
+    [record] = caplog.records
+    assert record.levelno == logging.WARNING
+    assert run.run_id in record.getMessage()
+    assert "started with the Claude API" in record.getMessage()
+    assert store.get_run(run.run_id).status is RunStatus.WAITING_APPROVAL
+
+
 def test_mock_runs_use_a_mock_provider_even_on_a_claude_server(store, settings):
     claude = FakeClaude()
     worker = Worker(store, settings, claude)

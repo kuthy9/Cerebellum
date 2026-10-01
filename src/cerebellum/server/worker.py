@@ -14,7 +14,7 @@ import httpx
 from cerebellum.ai.base import AIProvider
 from cerebellum.ai.mock import MockProvider
 from cerebellum.config import Settings
-from cerebellum.errors import ApprovalExpired, CerebellumError, LeaseUnavailable
+from cerebellum.errors import ApprovalExpired, CerebellumError, LeaseUnavailable, NeedsClaude
 from cerebellum.runtime.clock import Clock
 from cerebellum.runtime.engine import Engine, refuse_eval_run
 from cerebellum.runtime.states import RUN_RESUMABLE
@@ -44,6 +44,8 @@ class Worker:
         self._mock: AIProvider | None = provider if provider.mock else None
         self._tasks: set[asyncio.Task[Any]] = set()
         self._sweeper: asyncio.Task[None] | None = None
+        # Overdue runs the sweep cannot continue (Claude runs on mock AI), already logged once.
+        self._cannot_sweep: set[str] = set()
 
     def engine(self, *, mock: bool) -> Engine:
         """An engine whose AI provider matches the run: mock runs stay on the mock provider."""
@@ -63,7 +65,7 @@ class Worker:
         """The engine that continues `run`. A run started with the Claude API never continues on
         mock AI (this dashboard's provider when it has no Anthropic credentials or --mock)."""
         if not run.mock and self.provider.mock:
-            raise CerebellumError(
+            raise NeedsClaude(
                 f"run {run.run_id} was started with the Claude API but this dashboard uses mock "
                 "AI; restart `cerebellum ui` with Anthropic credentials (and without --mock) "
                 "to continue it"
@@ -126,10 +128,18 @@ class Worker:
                 if approval.expires_at is not None and approval.expires_at <= now
             }
         )
+        self._cannot_sweep.intersection_update(due)  # forget runs that are no longer overdue
         resumed: list[str] = []
         for run_id in due:
             try:
                 self.resume(run_id)
+            except NeedsClaude as exc:
+                # Said once per run, not on every pass. Its on_timeout is applied once a process
+                # with Anthropic credentials resumes it.
+                if run_id not in self._cannot_sweep:
+                    self._cannot_sweep.add(run_id)
+                    log.warning("overdue approval of run %s left pending: %s", run_id, exc)
+                continue
             except CerebellumError:
                 continue  # driven elsewhere (its owner applies the timeout) or finished meanwhile
             resumed.append(run_id)
