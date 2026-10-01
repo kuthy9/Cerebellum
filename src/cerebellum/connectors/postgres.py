@@ -102,15 +102,19 @@ class SqliteSandboxConnector(SqlConnector):
     async def query(self, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
         def op(conn: sqlite3.Connection) -> list[dict[str, Any]]:
             rows = conn.execute(sql, dict(params)).fetchall()
+            if conn.in_transaction:  # a write with RETURNING
+                conn.commit()
             return [{key: jsonable(row[key]) for key in row.keys()} for row in rows]
 
         return await self._run(op)
 
     async def execute(self, sql: str, params: Mapping[str, Any]) -> int:
         def op(conn: sqlite3.Connection) -> int:
+            before = conn.total_changes
             cursor = conn.execute(sql, dict(params))
             conn.commit()
-            return cursor.rowcount
+            # sqlite3 has no rowcount for a write that starts with WITH; count its changes.
+            return cursor.rowcount if cursor.rowcount >= 0 else conn.total_changes - before
 
         return await self._run(op)
 

@@ -9,6 +9,8 @@ from cerebellum.spec import parse_workflow
 
 SIMPLE_YAML = """
 name: simple
+input:
+  order_id: {type: string}
 steps:
   - id: first
     type: validate

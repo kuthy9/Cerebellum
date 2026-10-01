@@ -21,6 +21,7 @@ from cerebellum.spec.models import (
 )
 from cerebellum.steps import EXECUTORS
 from cerebellum.steps.base import StepRuntime
+from cerebellum.steps.query import returns_rows
 
 CTX = {
     "input": {"order_id": "A1", "amount": 50, "reason": "broken"},
@@ -147,6 +148,75 @@ async def test_query_write_returns_rowcount(orders):
     rt, rec = runtime(step, pool=FakePool(db=orders))
     assert await EXECUTORS["query"](rt) == {"rowcount": 1}
     assert rec.calls[0][1]["operation"] == "execute" and rec.calls[0][1]["rowcount"] == 1
+
+
+async def run_sql(connector, sql, *, expect="any", params=None):
+    step = QueryStep(
+        id="q", type="query", connector="db", sql=sql, expect=expect, params=params or {}
+    )
+    rt, rec = runtime(step, pool=FakePool(db=connector))
+    return await EXECUTORS["query"](rt), rec.calls[0][1]["operation"]
+
+
+async def committed_amounts(orders):
+    fresh = SqliteSandboxConnector("check", orders.path, None)
+    try:
+        rows = await fresh.query("SELECT id, amount FROM orders ORDER BY id", {})
+    finally:
+        await fresh.close()
+    return {row["id"]: row["amount"] for row in rows}
+
+
+async def test_query_statement_after_a_comment_is_classified_by_the_statement(orders):
+    read = "-- the order\nSELECT id FROM orders WHERE id = :id"
+    assert await run_sql(orders, read, expect="one", params={"id": "A1"}) == (
+        {"id": "A1"},
+        "query",
+    )
+    update = "-- note\nUPDATE orders SET amount = 1 WHERE id = 'A1'"
+    assert await run_sql(orders, update) == ({"rowcount": 1}, "execute")
+    delete = "/* x */ DELETE FROM orders WHERE id = 'A2'"
+    assert await run_sql(orders, delete) == ({"rowcount": 1}, "execute")
+    assert await committed_amounts(orders) == {"A1": 1}
+
+
+async def test_query_data_modifying_cte_is_a_write(orders):
+    sql = (
+        "WITH target AS (SELECT 'A2' AS id) "
+        "UPDATE orders SET amount = 0 WHERE id IN (SELECT id FROM target)"
+    )
+    assert await run_sql(orders, sql) == ({"rowcount": 1}, "execute")
+    assert await committed_amounts(orders) == {"A1": 80, "A2": 0}
+
+
+async def test_query_write_with_returning_outputs_its_rows_and_commits(orders):
+    sql = "UPDATE orders SET amount = amount + 1 WHERE id = :id RETURNING id, amount"
+    assert await run_sql(orders, sql, expect="one", params={"id": "A1"}) == (
+        {"id": "A1", "amount": 81},
+        "query",
+    )
+    assert await committed_amounts(orders) == {"A1": 81, "A2": 20}
+    quoted = "UPDATE orders SET amount = 5 WHERE id = 'returning'"
+    assert await run_sql(orders, quoted) == ({"rowcount": 0}, "execute")
+
+
+@pytest.mark.parametrize(
+    ("sql", "rows"),
+    [
+        ("select 1", True),
+        ("  /* a */ -- b\n  VALUES (1)", True),
+        ("WITH x AS (SELECT 1) SELECT * FROM x", True),
+        ("WITH moved AS (DELETE FROM a RETURNING *) SELECT * FROM moved", True),
+        ("WITH RECURSIVE x(n) AS (SELECT 1) INSERT INTO t SELECT n FROM x", False),
+        ("WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x RETURNING id", True),
+        ("INSERT INTO t (v) VALUES ('a') ON CONFLICT (v) DO UPDATE SET v = 'b' RETURNING v", True),
+        ('UPDATE t SET note = $$ returning $$, other = "returning"', False),
+        ("UPDATE t SET note = 'it''s -- returning' WHERE id = 1", False),
+        ("-- only a comment", False),
+    ],
+)
+def test_returns_rows_classifies_statements(sql, rows):
+    assert returns_rows(sql) is rows
 
 
 async def test_query_connector_error_is_recorded_and_raised(orders):

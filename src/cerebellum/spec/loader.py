@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import os
 import re
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 from typing import Any
@@ -14,7 +14,13 @@ import yaml
 from pydantic import ValidationError
 
 from cerebellum.errors import SpecError, SpecIssue, TemplateError
-from cerebellum.spec.expressions import check_expression, check_template, is_template
+from cerebellum.spec.expressions import (
+    check_expression,
+    check_template,
+    expression_step_refs,
+    is_template,
+    template_step_refs,
+)
 from cerebellum.spec.models import (
     AiStep,
     ApprovalStep,
@@ -28,6 +34,10 @@ from cerebellum.spec.schemas import schema_problems
 
 _ENV_REF = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)(?::-([^}]*))?\}")
 _CONNECTOR_TYPES = {"query": "postgres", "http": "rest"}
+# Workflow fields whose items are unions discriminated by `type`.
+_TAGGED_FIELDS = ("steps", "fallbacks", "connectors")
+# What pydantic appends to an error location when a mapping key itself is invalid.
+_KEY_MARKER = "[key]"
 
 
 def load_workflow(path: str | Path, *, env: Mapping[str, str] | None = None) -> Workflow:
@@ -60,7 +70,7 @@ def parse_workflow(
         workflow = Workflow.model_validate(data)
     except ValidationError as exc:
         raise SpecError(
-            [SpecIssue(issue_path(err["loc"]), err["msg"]) for err in exc.errors()]
+            [SpecIssue(issue_path(_untagged(err["loc"], data)), err["msg"]) for err in exc.errors()]
         ) from exc
 
     issues = semantic_issues(workflow)
@@ -76,12 +86,28 @@ def parse_workflow(
 
 def issue_path(loc: tuple[Any, ...]) -> str:
     out = ""
-    for part in loc:
-        if isinstance(part, int):
+    for i, part in enumerate(loc):
+        if part == _KEY_MARKER:
+            continue
+        if loc[i + 1 : i + 2] == (_KEY_MARKER,):
+            out += f" (key {part})" if out else f"(key {part})"
+        elif isinstance(part, int):
             out += f"[{part}]"
         else:
             out += f".{part}" if out else str(part)
     return out or "<root>"
+
+
+def _untagged(loc: tuple[Any, ...], data: dict[str, Any]) -> tuple[Any, ...]:
+    """Drop the union tag pydantic puts after a step or connector in an error location
+    (steps[0].query.sql -> steps[0].sql); a field that shares the tag's name is kept."""
+    if len(loc) < 3 or loc[0] not in _TAGGED_FIELDS:
+        return loc
+    try:
+        tag = data[loc[0]][loc[1]]["type"]
+    except (KeyError, IndexError, TypeError):
+        return loc
+    return (*loc[:2], *loc[3:]) if loc[2] == tag else loc
 
 
 def _interpolate(value: Any, env: Mapping[str, str], path: str, issues: list[SpecIssue]) -> Any:
@@ -120,6 +146,28 @@ def semantic_issues(wf: Workflow) -> list[SpecIssue]:
         if step.id in seen:
             issues.append(SpecIssue(f"{path}.id", f"duplicate step id '{step.id}'"))
         seen.add(step.id)
+
+    upstream = _upstream(wf)
+    owners: dict[str, str] = {}
+    for step in wf.steps:
+        if step.on_failure:
+            owners.setdefault(step.on_failure.fallback, step.id)
+
+    def stray_ref(step_id: str, ref: str) -> str | None:
+        """Why `steps.<ref>` has no settled value when main step `step_id` runs, or None."""
+        before = upstream[step_id]
+        if ref == step_id or ref in before:
+            return None
+        if ref in main:
+            return (
+                f"step '{ref}' is not upstream of '{step_id}' "
+                "(not in its needs, directly or transitively)"
+            )
+        if ref in fallbacks:
+            if owners.get(ref) in before:
+                return None
+            return f"fallback '{ref}' does not belong to a step upstream of '{step_id}'"
+        return f"unknown step '{ref}'"
 
     fallback_users: dict[str, str] = {}
     for path, step, is_fallback in located:
@@ -199,7 +247,8 @@ def semantic_issues(wf: Workflow) -> list[SpecIssue]:
             for problem in schema_problems(step.output_schema):
                 issues.append(SpecIssue(f"{path}.output_schema", problem))
 
-        issues.extend(_expression_issues(path, step))
+        # Fallbacks run after a failure and may read any main step.
+        issues.extend(_expression_issues(path, step, None if is_fallback else stray_ref))
 
     graph = {step.id: {dep for dep in step.needs if dep in main} for step in wf.steps}
     try:
@@ -215,20 +264,51 @@ def semantic_issues(wf: Workflow) -> list[SpecIssue]:
     return issues
 
 
-def _expression_issues(path: str, step: Any) -> list[SpecIssue]:
+def _upstream(wf: Workflow) -> dict[str, set[str]]:
+    """Each main step's transitive needs: the steps that have settled before it runs."""
+    main = set(wf.step_ids)
+    needs = {step.id: [dep for dep in step.needs if dep in main] for step in wf.steps}
+    upstream: dict[str, set[str]] = {}
+    for step_id, direct in needs.items():
+        found: set[str] = set()
+        pending = list(direct)
+        while pending:
+            dep = pending.pop()
+            if dep not in found:
+                found.add(dep)
+                pending.extend(needs[dep])
+        upstream[step_id] = found
+    return upstream
+
+
+def _expression_issues(
+    path: str, step: Any, stray_ref: Callable[[str, str], str | None] | None
+) -> list[SpecIssue]:
     issues: list[SpecIssue] = []
+
+    def refs(field: str, found: set[str]) -> None:
+        if stray_ref is None:
+            return
+        for ref in sorted(found):
+            problem = stray_ref(step.id, ref)
+            if problem:
+                issues.append(SpecIssue(f"{path}.{field}", problem))
 
     def expr(field: str, value: str) -> None:
         try:
             check_expression(value)
         except TemplateError as exc:
             issues.append(SpecIssue(f"{path}.{field}", str(exc)))
+        else:
+            refs(field, expression_step_refs(value))
 
     def template(field: str, value: Any) -> None:
         try:
             check_template(value)
         except TemplateError as exc:
             issues.append(SpecIssue(f"{path}.{field}", str(exc)))
+        else:
+            refs(field, template_step_refs(value))
 
     if step.when:
         expr("when", step.when)

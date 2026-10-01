@@ -37,6 +37,8 @@ def validate_input(wf: Workflow, data: Any) -> dict[str, Any]:
             )
         elif field.enum is not None and value not in field.enum:
             issues.append(SpecIssue(f"input.{name}", f"must be one of {field.enum}"))
+    for key in sorted(set(data) - set(wf.input), key=str):
+        issues.append(SpecIssue(f"input.{key}", "is not declared in the workflow"))
     if issues:
         raise SpecError(issues)
     return dict(data)

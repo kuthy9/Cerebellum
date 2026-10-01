@@ -124,6 +124,35 @@ def test_structural_error_has_a_path():
     assert any(issue.startswith("steps[0]") and "sql" in issue for issue in issues)
 
 
+def test_structural_error_paths_omit_the_union_tag():
+    def mutate(d):
+        del d["steps"][0]["sql"]
+        d["steps"][0]["query"] = "a field named like the tag"
+        d["steps"][2]["query"] = "not a mapping"
+        d["steps"][2]["query_typo"] = 1
+        del d["connectors"]["db"]["dsn"]
+        d["fallbacks"][0]["query"] = 1
+
+    issues = issues_of(variant(mutate))
+    assert "steps[0].sql: Field required" in issues
+    assert "steps[0].query: Extra inputs are not permitted" in issues
+    assert "steps[2].query: Input should be a valid dictionary" in issues
+    assert "steps[2].query_typo: Extra inputs are not permitted" in issues
+    assert "connectors.db.dsn: Field required" in issues
+    assert "fallbacks[0].query: Extra inputs are not permitted" in issues
+    assert not any(".query.sql" in i or ".http." in i or ".postgres." in i for i in issues)
+
+
+def test_non_string_mapping_keys_have_a_readable_path():
+    def mutate(d):
+        d["params"][1] = "x"
+        d["connectors"][2] = {"type": "rest", "base_url": "http://127.0.0.1:9"}
+
+    issues = issues_of(variant(mutate))
+    assert "params (key 1): Input should be a valid string" in issues
+    assert "connectors (key 2): Input should be a valid string" in issues
+
+
 def test_duplicate_ids():
     text = variant(lambda d: d["fallbacks"].append({"id": "load", "type": "task", "title": "x"}))
     assert "fallbacks[1].id: duplicate step id 'load'" in issues_of(text)
@@ -230,10 +259,77 @@ def test_output_templates_are_checked():
     assert any(issue.startswith("output.code: invalid template") for issue in issues_of(text))
 
 
+def test_references_to_steps_that_are_not_upstream_are_rejected():
+    def mutate(d):
+        d["steps"][0]["when"] = "steps.call.status == 'succeeded'"
+        d["steps"][1]["rules"].append({"expr": "steps['call'].output", "message": "later"})
+        d["steps"][2]["body"]["note"] = "{{ steps.ghost.output }}"
+        d["steps"].append(
+            {
+                "id": "audit",
+                "type": "task",
+                "needs": ["load"],
+                "title": "{{ steps.check.status }} {{ steps.load.status }}",
+                "payload": {"fallback": "{{ steps.manual.status }}"},
+            }
+        )
+        d["steps"].append(
+            {
+                "id": "judge",
+                "type": "ai",
+                "needs": ["load"],
+                "prompt": "Judge {{ input.order_id }}",
+                "output_schema": {"type": "object", "properties": {"ok": {"type": "string"}}},
+                "mock": [{"when": "steps.audit.status", "output": {"ok": "{{ steps.call }}"}}],
+            }
+        )
+
+    not_upstream = "is not upstream of {!r} (not in its needs, directly or transitively)"
+    assert issues_of(variant(mutate)) == [
+        f"steps[0].when: step 'call' {not_upstream.format('load')}",
+        f"steps[1].rules[1].expr: step 'call' {not_upstream.format('check')}",
+        "steps[2].body: unknown step 'ghost'",
+        f"steps[3].title: step 'check' {not_upstream.format('audit')}",
+        "steps[3].payload: fallback 'manual' does not belong to a step upstream of 'audit'",
+        f"steps[4].mock[0].when: step 'audit' {not_upstream.format('judge')}",
+        f"steps[4].mock[0].output: step 'call' {not_upstream.format('judge')}",
+    ]
+
+
+def test_references_to_upstream_steps_itself_and_from_fallbacks_are_accepted():
+    def mutate(d):
+        d["steps"][2]["body"]["one"] = "{{ steps.load.output.one }}"
+        d["steps"][2]["headers"] = {"X-Attempt": "{{ steps.call.attempts }}"}
+        d["steps"].append(
+            {
+                "id": "after",
+                "type": "task",
+                "needs": ["call"],
+                "title": "{{ steps.manual.status }} {{ steps['check'].status }}",
+                "payload": {"dynamic": "{{ steps[input.order_id] }}"},
+            }
+        )
+        d["fallbacks"][0]["payload"] = {"later": "{{ steps.after.status }}"}
+        d["output"]["after"] = "{{ steps.after.status }}"
+
+    parse_workflow(variant(mutate), env={})
+
+
 def test_validate_input_accepts_valid_data():
     wf = parse_workflow(dump(BASE), env={})
-    data = {"order_id": "A1", "amount": 12.5, "tier": "gold", "extra": True}
+    data = {"order_id": "A1", "amount": 12.5, "tier": "gold"}
     assert validate_input(wf, data) == data
+
+
+def test_validate_input_rejects_undeclared_keys():
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError) as info:
+        validate_input(wf, {"order_id": "A1", "amount": "1", "extra": True, "colour": None})
+    assert [str(i) for i in info.value.issues] == [
+        "input.amount: expected number, got str '1'",
+        "input.colour: is not declared in the workflow",
+        "input.extra: is not declared in the workflow",
+    ]
 
 
 def test_validate_input_reports_every_problem():
