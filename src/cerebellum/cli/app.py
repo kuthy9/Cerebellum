@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import math
 import os
 import shutil
 import sqlite3
@@ -314,12 +315,24 @@ def _parse_input(raw: str) -> dict[str, Any]:
     return data
 
 
+def _reject_constant(name: str) -> NoReturn:
+    raise ValueError(f"{name} is not JSON")
+
+
+def _finite_float(text: str) -> float:
+    number = float(text)
+    if not math.isfinite(number):
+        raise ValueError(f"{text} is out of range")
+    return number
+
+
 def _param_value(text: str) -> Any:
     """A JSON value (number, true/false/null, "quoted string", object, array); anything else
-    is kept as the literal string, so `no`, `on` and `010` stay text."""
+    is kept as the literal string, so `no`, `on` and `010` stay text. So do NaN, Infinity and
+    numbers out of float range (1e400): a run's params must stay serialisable as JSON."""
     try:
-        return json.loads(text)
-    except json.JSONDecodeError:
+        return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
+    except ValueError:  # JSONDecodeError, a rejected constant or float, an over-long integer
         return text
 
 

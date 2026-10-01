@@ -257,6 +257,23 @@ def test_param_values_are_json_or_the_literal_string():
     }
 
 
+@pytest.mark.parametrize(
+    "text", ["NaN", "Infinity", "-Infinity", "1e400", "-1e400", "[1, NaN]", '{"a": 1e400}']
+)
+def test_param_values_keep_non_finite_numbers_as_text(text):
+    """Review finding: json.loads accepts NaN/Infinity and turns 1e400 into inf; a run storing
+    one made the dashboard's run endpoints fail (such values are not JSON)."""
+    assert cli._parse_params([f"limit={text}"]) == {"limit": text}
+
+
+def test_run_stores_a_non_finite_param_as_text(runner):
+    result = invoke(
+        runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'small.json'}", "-p", "approval_threshold=NaN"
+    )
+    with Store(Settings.from_env().db_path) as store:
+        assert store.get_run(run_id_of(result)).params["approval_threshold"] == "NaN"
+
+
 def test_param_override_changes_the_approval_threshold(runner):
     result = invoke(
         runner,
