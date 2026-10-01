@@ -53,8 +53,13 @@ def _port_in_use(host: str, port: int) -> bool:
         return sock.connect_ex((host, port)) == 0
 
 
+def sandbox_url(host: str, port: int) -> str:
+    """The base URL of the sandbox payments API on `host`:`port` (what start_sandbox serves)."""
+    return f"http://{host}:{port}"
+
+
 def start_sandbox(host: str, port: int, fail: str = "never") -> SandboxHandle:
-    url = f"http://{host}:{port}"
+    url = sandbox_url(host, port)
     if sandbox_running(url):
         handle = SandboxHandle(url, owned=False)
         handle.set_fail_mode(fail)

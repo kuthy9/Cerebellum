@@ -1,4 +1,6 @@
 import re
+import shutil
+import socket
 
 import httpx
 import pytest
@@ -117,6 +119,45 @@ def test_eval_rejects_an_invalid_suite_with_exit_2(runner, tmp_path):
     assert result.exit_code == 2, result.text
     assert "cases[0].expect.steps.nope.status" in result.text
     assert "cases[0].input.amount" in result.text
+
+
+def test_an_invalid_suite_is_reported_even_when_the_sandbox_port_is_busy(
+    runner, tmp_path, free_port
+):
+    """Review finding: the sandbox started first, so a busy port hid the suite's issues."""
+    path = tmp_path / "bad.yaml"
+    path.write_text(
+        f"suite: bad\nworkflow: {WORKFLOW}\ncases:\n"
+        "  - id: a\n    input: {order_id: A1}\n    expect: {steps.nope.status: x}\n",
+        encoding="utf-8",
+    )
+    with socket.socket() as blocker:
+        blocker.bind(("127.0.0.1", free_port))
+        blocker.listen()
+        result = invoke(runner, "eval", path)
+    assert result.exit_code == 2, result.text
+    assert "cases[0].expect.steps.nope.status" in result.text
+    assert "in use" not in result.text
+
+
+def test_a_workflow_that_needs_the_sandbox_url_validates_before_the_sandbox_starts(
+    runner, tmp_path, free_port
+):
+    """The suite is validated before the sandbox starts, with PAYMENTS_URL as the sandbox
+    will set it: a connector that requires the variable still loads and targets the sandbox."""
+    project = tmp_path / "refund"
+    shutil.copytree(template_path("refund"), project)
+    workflow = project / "workflow.yaml"
+    source = workflow.read_text(encoding="utf-8")
+    workflow.write_text(
+        source.replace("${PAYMENTS_URL:-http://127.0.0.1:8787}", "${PAYMENTS_URL}"),
+        encoding="utf-8",
+    )
+    suite = tmp_path / "smoke.yaml"
+    suite.write_text(SUITE.format(workflow=workflow, small="refunded"), encoding="utf-8")
+    result = invoke(runner, "eval", suite)
+    assert result.exit_code == 0, result.text
+    assert f"http://127.0.0.1:{free_port} (sandbox)" in result.text and "3/3 passed" in result.text
 
 
 def test_eval_warns_when_a_connector_is_not_the_sandbox(runner, tmp_path, monkeypatch):

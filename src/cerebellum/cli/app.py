@@ -48,7 +48,7 @@ from cerebellum.runtime.states import RunStatus
 from cerebellum.runtime.store import EventRecord, RunRecord, Store
 from cerebellum.runtime.trace import build_spans
 from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments_app
-from cerebellum.sandbox.server import SandboxHandle, start_sandbox
+from cerebellum.sandbox.server import SandboxHandle, sandbox_url, start_sandbox
 from cerebellum.server import create_app
 from cerebellum.server.app import LOOPBACK_HOSTS, dashboard_server
 from cerebellum.spec import load_workflow
@@ -130,9 +130,9 @@ def _load(path: Path) -> Workflow:
         _invalid(f"{path} is invalid", exc)
 
 
-def _load_suite(path: Path) -> LoadedSuite:
+def _load_suite(path: Path, env: dict[str, str] | None = None) -> LoadedSuite:
     try:
-        return load_suite(path)
+        return load_suite(path, env=env)
     except SpecError as exc:
         _invalid(f"{path} is invalid", exc)
 
@@ -817,8 +817,13 @@ def eval_suite(
 ) -> None:
     """Run an eval suite: one run per case, checked and compared with the previous run."""
     settings = _settings()
+    # Validate before starting anything, with the environment the run will have: unless the
+    # user set SANDBOX_URL_ENV, the sandbox sets it to its own URL (connectors may read it).
+    env = dict(os.environ)
+    if not no_sandbox and SANDBOX_URL_ENV not in env:
+        env[SANDBOX_URL_ENV] = sandbox_url(settings.sandbox_host, settings.sandbox_port)
+    loaded = _load_suite(suite, env)
     with _eval_lock(settings), _sandbox(settings, "never", enabled=not no_sandbox) as handle:
-        loaded = _load_suite(suite)  # after the sandbox starts: connector URLs may point at it
         choice = select_provider(settings, force_mock=mock or loaded.suite.defaults.mock)
         with Store(settings.db_path) as store:
             runner = EvalRunner(
