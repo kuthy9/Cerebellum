@@ -8,6 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cerebellum.ai.mock import MockProvider
+from cerebellum.config import MAX_NESTING_DEPTH
 from cerebellum.runtime.engine import Engine
 from cerebellum.runtime.states import RunStatus, StepStatus
 from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments_app
@@ -301,6 +302,49 @@ def test_starting_a_run_with_a_non_finite_number_is_refused(client, store, body)
     strict_json(refused)
     assert store.list_runs() == []
     assert client.get("/api/runs").status_code == 200
+
+
+@pytest.mark.parametrize("depth", [MAX_NESTING_DEPTH + 1, 600, 1500, 9000, 100000])
+@pytest.mark.parametrize("field", ["input", "params"])
+def test_starting_a_run_nested_too_deeply_is_refused(store, settings, tmp_path, depth, field):
+    """Review finding: POST /api/runs stored a run whose input nested 500 levels deep and
+    answered 500 (as did every GET /api/runs after it); deeper, validating it failed with a
+    RecursionError (500)."""
+    (tmp_path / "free.yaml").write_text(
+        "name: free\ninput:\n  lines: {type: array}\nparams: {limit: 1}\n"
+        "steps:\n  - {id: gate, type: approval, title: ok}\n",
+        encoding="utf-8",
+    )
+    deep = "[" * depth + "]" * depth
+    payload = {"input": f'{{"lines": {deep}}}', "params": f'{{"limit": {deep}}}'}[field]
+    body = f'{{"workflow": "free.yaml", "{field}": {payload}}}'
+    with TestClient(app_with(store, settings, tmp_path, tmp_path / "not-built")) as c:
+        refused = c.post("/api/runs", content=body, headers={"content-type": "application/json"})
+        assert 400 <= refused.status_code < 500, (refused.status_code, refused.text[:300])
+        assert store.list_runs() == []
+        assert c.get("/api/runs").status_code == 200
+        if depth < 100000:  # that deep, the JSON parser gives up: "error parsing the body"
+            assert "nested more than" in refused.text
+
+
+def test_the_catalog_skips_files_nested_too_deeply(store, settings, tmp_path):
+    """A workflow YAML or sample input nested too deeply is left out, not a 500."""
+    deep = "[" * 100000 + "]" * 100000
+    (tmp_path / "ok.yaml").write_text(
+        "name: ok\nsteps:\n  - {id: gate, type: approval, title: ok}\n", encoding="utf-8"
+    )
+    (tmp_path / "deep.yaml").write_text(f"name: deep\nmeta: {deep}\n", encoding="utf-8")
+    (tmp_path / "inputs").mkdir()
+    (tmp_path / "inputs" / "deep.json").write_text(deep, encoding="utf-8")
+    (tmp_path / "inputs" / "deeper.json").write_text(f'{{"a": {deep[:1000]}{deep[-1000:]}}}')
+    (tmp_path / "inputs" / "fine.json").write_text('{"a": [[1]]}', encoding="utf-8")
+    with TestClient(app_with(store, settings, tmp_path, tmp_path / "not-built")) as c:
+        listed = c.get("/api/workflows")
+        assert listed.status_code == 200, listed.text[:300]
+        assert [w["id"] for w in listed.json()["workflows"]] == ["ok.yaml"]
+        detail = c.get("/api/workflows/ok.yaml")
+        assert detail.status_code == 200, detail.text[:300]
+        assert detail.json()["samples"] == {"fine": {"a": [[1]]}}
 
 
 def test_runs_holding_non_finite_numbers_are_served_with_null(client, store, simple_workflow):

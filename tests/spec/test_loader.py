@@ -3,6 +3,7 @@ import copy
 import pytest
 import yaml
 
+from cerebellum.config import MAX_NESTING_DEPTH
 from cerebellum.errors import SpecError
 from cerebellum.spec import load_workflow, parse_workflow, resolve_params, validate_input
 from cerebellum.spec.models import AiStep, HttpStep
@@ -432,3 +433,71 @@ def test_resolve_params_rejects_non_finite_overrides(value):
     wf = parse_workflow(dump(BASE), env={})
     with pytest.raises(SpecError, match=r"^params\.threshold[^:]*: must be a finite number"):
         resolve_params(wf, {"threshold": value})
+
+
+def nested(depth):
+    """A list `depth` levels deep: nested(1) == [], nested(2) == [[]]."""
+    value = []
+    for _ in range(depth - 1):
+        value = [value]
+    return value
+
+
+def deep_input_workflow():
+    def mutate(d):
+        d["input"]["lines"] = {"type": "array"}
+
+    return parse_workflow(variant(mutate), env={})
+
+
+def test_validate_input_accepts_values_nested_up_to_the_limit():
+    wf = deep_input_workflow()
+    data = {"order_id": "A1", "amount": 1, "lines": nested(MAX_NESTING_DEPTH)}
+    assert validate_input(wf, data) == data
+    assert resolve_params(wf, {"threshold": nested(MAX_NESTING_DEPTH)})
+
+
+@pytest.mark.parametrize("depth", [MAX_NESTING_DEPTH + 1, 2000])
+def test_validate_input_rejects_values_nested_too_deeply(depth):
+    """Review finding: a run whose input nested a few hundred levels deep was stored, then every
+    dashboard listing of runs failed with a RecursionError (500); deeper still, validating it
+    ended in a RecursionError traceback."""
+    wf = deep_input_workflow()
+    with pytest.raises(SpecError) as info:
+        validate_input(wf, {"order_id": "A1", "amount": 1, "lines": nested(depth)})
+    assert [str(i) for i in info.value.issues] == [
+        f"input.lines: is nested more than {MAX_NESTING_DEPTH} levels deep"
+    ]
+    with pytest.raises(SpecError) as info:  # the wrong type: its repr is not shown either
+        validate_input(wf, {"order_id": nested(depth), "amount": 1})
+    assert [str(i) for i in info.value.issues] == [
+        f"input.order_id: is nested more than {MAX_NESTING_DEPTH} levels deep"
+    ]
+
+
+@pytest.mark.parametrize("depth", [MAX_NESTING_DEPTH + 1, 2000])
+def test_resolve_params_rejects_overrides_nested_too_deeply(depth):
+    wf = parse_workflow(dump(BASE), env={})
+    with pytest.raises(SpecError) as info:
+        resolve_params(wf, {"threshold": nested(depth)})
+    assert [str(i) for i in info.value.issues] == [
+        f"params.threshold: is nested more than {MAX_NESTING_DEPTH} levels deep"
+    ]
+
+
+@pytest.mark.parametrize("depth", [MAX_NESTING_DEPTH, 5000, 100000])
+def test_a_workflow_nested_too_deeply_is_invalid(depth):
+    """Review finding: YAML nested a few hundred levels deep ended in a RecursionError
+    traceback; a little less deep, it loaded and the run it made broke the dashboard."""
+    text = dump(BASE) + "\nmeta: " + "[" * depth + "]" * depth + "\n"
+    with pytest.raises(SpecError) as info:
+        parse_workflow(text, env={})
+    assert [str(i) for i in info.value.issues] == [
+        f"<yaml>: is nested more than {MAX_NESTING_DEPTH} levels deep"
+    ]
+
+
+def test_a_workflow_that_contains_itself_is_invalid():
+    """A YAML alias inside its own anchor makes a value that contains itself."""
+    text = variant(lambda d: d.pop("params")) + "params: &loop {threshold: 1, again: *loop}\n"
+    assert issues_of(text) == [f"<yaml>: is nested more than {MAX_NESTING_DEPTH} levels deep"]

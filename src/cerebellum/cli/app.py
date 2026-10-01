@@ -58,6 +58,7 @@ from cerebellum.sandbox.server import SandboxHandle, sandbox_url, start_sandbox
 from cerebellum.server import create_app
 from cerebellum.server.app import dashboard_server, loopback_host_names
 from cerebellum.spec import load_workflow
+from cerebellum.spec.inputs import TOO_DEEP
 from cerebellum.spec.models import Workflow
 from cerebellum.templates import template_path
 
@@ -319,6 +320,8 @@ def _parse_input(raw: str) -> dict[str, Any]:
         )
     except ValueError as exc:  # a rejected constant or float, an over-long integer
         _fail(f"input is not valid JSON: {exc}", EXIT_INVALID)
+    except RecursionError:  # thousands of levels: the parser gives up (fewer: see validate_input)
+        _fail(f"input is not valid JSON: it {TOO_DEEP}", EXIT_INVALID)
     if not isinstance(data, dict):
         _fail("input must be a JSON object", EXIT_INVALID)
     return data
@@ -338,7 +341,8 @@ def _finite_float(text: str) -> float:
 def _param_value(text: str) -> Any:
     """A JSON value (number, true/false/null, "quoted string", object, array); anything else
     is kept as the literal string, so `no`, `on` and `010` stay text. So do NaN, Infinity and
-    numbers out of float range (1e400): a run's params must stay serialisable as JSON."""
+    numbers out of float range (1e400): a run's params must stay serialisable as JSON. JSON
+    nested too deeply to parse raises RecursionError (refused by _parse_params)."""
     try:
         return json.loads(text, parse_constant=_reject_constant, parse_float=_finite_float)
     except ValueError:  # JSONDecodeError, a rejected constant or float, an over-long integer
@@ -351,7 +355,10 @@ def _parse_params(items: list[str]) -> dict[str, Any]:
         key, sep, value = item.partition("=")
         if not sep or not key.strip():
             _fail(f"invalid --param {item!r}; use key=value", EXIT_INVALID)
-        params[key.strip()] = _param_value(value)
+        try:
+            params[key.strip()] = _param_value(value)
+        except RecursionError:  # JSON, so not kept as text: refused like any too-deep value
+            _fail(f"invalid --param {key.strip()}: its JSON value {TOO_DEEP}", EXIT_INVALID)
     return params
 
 

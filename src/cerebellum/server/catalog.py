@@ -14,6 +14,7 @@ from typing import Any
 from cerebellum.errors import SpecError
 from cerebellum.runtime.store import Store
 from cerebellum.spec import load_workflow, parse_workflow
+from cerebellum.spec.inputs import nests_deeper_than
 from cerebellum.spec.models import Workflow
 
 DEFAULT_SCAN_DEPTH = 3
@@ -138,7 +139,9 @@ def _samples(directory: Path) -> dict[str, Any]:
     samples: dict[str, Any] = {}
     for path in sorted((directory / "inputs").glob("*.json")):
         try:
-            samples[path.stem] = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+            sample = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, RecursionError):
             continue
+        if not nests_deeper_than(sample):  # a run could not take it as its input
+            samples[path.stem] = sample
     return samples

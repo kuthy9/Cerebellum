@@ -45,6 +45,10 @@ DEFAULT_NEW_ATTEMPTS = 3
 # and the interrupt repeated at this interval until the statement's thread ends; SQLite drops an
 # interrupt that arrives before the statement starts.
 SANDBOX_INTERRUPT_RETRY_SECONDS = 0.05
+# How many levels deep arrays and objects may nest in a run's input values and params, and in a
+# workflow or eval-suite YAML document. Far deeper than any real business data, and far below the
+# depth where copying, serialising or validating it recursively fails (a few hundred levels).
+MAX_NESTING_DEPTH = 100
 # CEREBELLUM_PRICING_FILE: the highest price accepted, in USD per million tokens ($1 per token).
 # Far above any real model, low enough that costs stay finite numbers a budget can compare.
 MAX_PRICE_PER_MILLION_TOKENS = 1_000_000.0

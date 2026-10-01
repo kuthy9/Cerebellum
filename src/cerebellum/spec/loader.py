@@ -21,6 +21,7 @@ from cerebellum.spec.expressions import (
     is_template,
     template_step_refs,
 )
+from cerebellum.spec.inputs import TOO_DEEP, nests_deeper_than
 from cerebellum.spec.models import (
     AiStep,
     ApprovalStep,
@@ -59,10 +60,7 @@ def parse_workflow(
     """With `require_env=False` (for display only: no connector may be opened), an unset
     connector variable is kept as written instead of being an issue."""
     env = os.environ if env is None else env
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise SpecError([SpecIssue("<yaml>", str(exc))]) from exc
+    data = load_yaml(text)
     if not isinstance(data, dict):
         raise SpecError([SpecIssue("<root>", "workflow must be a YAML mapping")])
 
@@ -90,6 +88,21 @@ def parse_workflow(
     workflow.base_dir = base
     workflow.digest = hashlib.sha256(f"{base}\0{text}".encode()).hexdigest()[:16]
     return workflow
+
+
+def load_yaml(text: str) -> Any:
+    """The YAML document in `text` (a workflow or an eval suite). Nested too deeply, it is an
+    issue: the parser itself fails on a few hundred levels (RecursionError), and whatever then
+    copies, validates or serialises it would."""
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError as exc:
+        raise SpecError([SpecIssue("<yaml>", str(exc))]) from exc
+    except RecursionError:
+        raise SpecError([SpecIssue("<yaml>", TOO_DEEP)]) from None
+    if nests_deeper_than(data):
+        raise SpecError([SpecIssue("<yaml>", TOO_DEEP)])
+    return data
 
 
 def issue_path(loc: tuple[Any, ...]) -> str:

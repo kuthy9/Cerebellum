@@ -7,14 +7,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from cerebellum.errors import SpecError, SpecIssue, TemplateError
 from cerebellum.sandbox.payments import FailMode
 from cerebellum.spec.expressions import check_expression
 from cerebellum.spec.inputs import validate_input
-from cerebellum.spec.loader import issue_path, load_workflow
+from cerebellum.spec.loader import issue_path, load_workflow, load_yaml
 from cerebellum.spec.models import Identifier, Workflow
 
 Decision = Literal["approved", "rejected"]
@@ -76,10 +75,7 @@ def load_suite(path: str | Path, *, env: Mapping[str, str] | None = None) -> Loa
         text = path.read_text(encoding="utf-8")
     except OSError as exc:
         raise SpecError([SpecIssue(str(path), f"cannot read file: {exc.strerror}")]) from exc
-    try:
-        data = yaml.safe_load(text)
-    except yaml.YAMLError as exc:
-        raise SpecError([SpecIssue("<yaml>", str(exc))]) from exc
+    data = load_yaml(text)
     if not isinstance(data, dict):
         raise SpecError([SpecIssue("<root>", "an eval suite must be a YAML mapping")])
     try:

@@ -321,6 +321,69 @@ def test_run_rejects_non_finite_numbers_in_input(runner, tmp_path, bad):
     assert "no runs yet" in invoke(runner, "runs").text
 
 
+def deep_json(depth):
+    return "[" * depth + "]" * depth
+
+
+@pytest.mark.parametrize("wrap", ["{}", '{{"order_id": "A1001", "amount": 10, "notes": {}}}'])
+def test_run_refuses_input_nested_too_deeply_for_json(runner, tmp_path, wrap):
+    """Review finding: input nested 100000 levels deep (inline or @file) ended in a
+    RecursionError traceback from parsing it."""
+    text = wrap.format(deep_json(100000))
+    path = tmp_path / "deep.json"
+    path.write_text(text, encoding="utf-8")
+    for raw in (text, f"@{path}"):
+        result = invoke(runner, "run", WORKFLOW, "-i", raw)
+        assert result.exit_code == 2, result.text[-500:]
+        assert isinstance(result.exception, SystemExit)
+        assert "input is not valid JSON" in result.text and "nested" in result.text
+    assert "no runs yet" in invoke(runner, "runs").text
+
+
+def test_run_refuses_input_nested_deeper_than_the_limit(runner):
+    text = f'{{"order_id": "A1001", "amount": {deep_json(2000)}}}'
+    result = invoke(runner, "run", WORKFLOW, "-i", text)
+    assert result.exit_code == 2, result.text[-500:]
+    assert isinstance(result.exception, SystemExit)
+    assert "input.amount" in result.text and "nested more than" in result.text
+    assert "no runs yet" in invoke(runner, "runs").text
+
+
+@pytest.mark.parametrize("depth", [2000, 100000])
+def test_a_param_nested_too_deeply_is_refused(runner, depth):
+    """Review finding: --param with a value nested 100000 levels deep ended in a RecursionError
+    traceback. It is JSON, so it is not kept as text: it is refused like a too-deep input."""
+    small = f"@{INPUTS / 'small.json'}"
+    result = invoke(
+        runner, "run", WORKFLOW, "-i", small, "-p", f"approval_threshold={deep_json(depth)}"
+    )
+    assert result.exit_code == 2, result.text[-500:]
+    assert isinstance(result.exception, SystemExit)
+    assert "approval_threshold" in result.text and "nested more than" in result.text
+    assert "no runs yet" in invoke(runner, "runs").text
+
+
+@pytest.mark.parametrize("command", ["validate", "show", "run"])
+def test_a_workflow_nested_too_deeply_is_invalid(runner, tmp_path, command):
+    flow = tmp_path / "deep.yaml"
+    flow.write_text(f"name: deep\nmeta: {deep_json(5000)}\nsteps: []\n", encoding="utf-8")
+    result = invoke(runner, command, str(flow))
+    assert result.exit_code == 2, result.text[-500:]
+    assert isinstance(result.exception, SystemExit)
+    assert "nested more than" in result.text
+
+
+def test_an_eval_suite_nested_too_deeply_is_invalid(runner, tmp_path):
+    suite = tmp_path / "evals.yaml"
+    suite.write_text(
+        f"suite: deep\nworkflow: {WORKFLOW}\ncases: {deep_json(5000)}\n", encoding="utf-8"
+    )
+    result = invoke(runner, "eval", str(suite), "--mock", "--no-sandbox")
+    assert result.exit_code == 2, result.text[-500:]
+    assert isinstance(result.exception, SystemExit)
+    assert "nested more than" in result.text
+
+
 def test_an_input_file_that_is_not_utf8_is_invalid_input(runner, tmp_path):
     """Review finding: a non-UTF-8 --input file ended in a UnicodeDecodeError traceback."""
     path = tmp_path / "input.json"

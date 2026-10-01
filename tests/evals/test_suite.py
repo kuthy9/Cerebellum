@@ -1,5 +1,6 @@
 import pytest
 
+from cerebellum.config import MAX_NESTING_DEPTH
 from cerebellum.errors import SpecError
 from cerebellum.evals import load_suite
 from cerebellum.evals.suite import path_problem
@@ -144,3 +145,24 @@ def test_unreadable_suite_file(tmp_path):
     with pytest.raises(SpecError) as exc:
         load_suite(tmp_path / "nope.yaml")
     assert "cannot read file" in exc.value.issues[0].message
+
+
+@pytest.mark.parametrize("depth", [MAX_NESTING_DEPTH, 5000, 100000])
+def test_a_suite_nested_too_deeply_is_invalid(tmp_path, depth):
+    """Review finding: a suite nested a few hundred levels deep ended `cerebellum eval` in a
+    RecursionError traceback."""
+    deep = "[" * depth + "]" * depth
+    path = write_suite(
+        tmp_path,
+        f"""
+suite: deep
+workflow: WORKFLOW
+cases:
+  - id: one
+    input: {{order_id: A1001, amount: 10, notes: {deep}}}
+    expect: {{status: succeeded}}
+""",
+    )
+    with pytest.raises(SpecError) as caught:
+        load_suite(path, env={})
+    assert issue_map(caught) == {"<yaml>": f"is nested more than {MAX_NESTING_DEPTH} levels deep"}
