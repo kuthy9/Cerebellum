@@ -4,6 +4,7 @@ human decision landing while the run suspends."""
 import asyncio
 
 import httpx
+import pytest
 
 from cerebellum.ai.mock import MockProvider
 from cerebellum.runtime.engine import Engine
@@ -195,3 +196,84 @@ async def test_suspend_run_is_atomic_with_the_approval_check_and_the_lease(
     unchanged = store.get_run(run.run_id)
     assert unchanged.status is RunStatus.RUNNING and unchanged.lease_owner == "owner-a"
     assert len(store.get_events(run.run_id)) == events_before
+
+
+SLOW_BRANCH_YAML = """
+name: slow_branch
+connectors: {api: {type: rest, base_url: "http://api.test"}}
+steps:
+  - {id: slow, type: http, connector: api, path: /slow}
+  - {id: ready, type: http, connector: api, path: /ready}
+  - {id: gate, type: approval, needs: [ready], title: Gate}
+"""
+
+
+def slow_api():
+    """`/slow` blocks for `delay[0]` seconds; `/ready` answers once `/slow` is in flight."""
+    entered = asyncio.Event()
+    delay = [20.0]
+
+    async def handler(request):
+        if request.url.path == "/ready":
+            await entered.wait()
+        else:
+            entered.set()
+            await asyncio.sleep(delay[0])
+        return httpx.Response(200, json={})
+
+    return entered, delay, httpx.MockTransport(handler)
+
+
+def step_tasks():
+    return [t for t in asyncio.all_tasks() if t.get_name().startswith("step:") and not t.done()]
+
+
+async def test_unexpected_engine_error_cancels_running_steps_and_fails_the_run(
+    store, settings, tmp_path, monkeypatch
+):
+    _, delay, transport = slow_api()
+
+    def broken_request_approval(*args, **kwargs):
+        raise RuntimeError("store exploded")
+
+    monkeypatch.setattr(store, "request_approval", broken_request_approval)
+    engine = engine_for(store, settings, {"api": transport})
+    with pytest.raises(RuntimeError, match="store exploded"):
+        await engine.start(wf(SLOW_BRANCH_YAML, tmp_path))
+
+    assert step_tasks() == []  # the sibling branch did not outlive the drive
+    [run] = store.list_runs()
+    assert run.status is RunStatus.FAILED and run.lease_owner is None
+    assert run.error == "engine error: RuntimeError: store exploded"
+    failed = [e for e in store.get_events(run.run_id) if e.type == "run.failed"]
+    assert failed[0].data["error"] == "engine error: RuntimeError: store exploded"
+    steps = store.get_steps(run.run_id)
+    assert steps["slow"].status is S.CANCELLED and steps["gate"].status is S.CANCELLED
+
+    monkeypatch.undo()
+    delay[0] = 0
+    run = await engine.resume(run.run_id)  # resumable once the cause is gone
+    assert run.status is RunStatus.WAITING_APPROVAL
+    assert store.get_step(run.run_id, "slow").status is S.SUCCEEDED
+
+
+async def test_cancelling_a_drive_stops_its_steps_and_leaves_the_run_resumable(
+    store, settings, tmp_path
+):
+    entered, delay, transport = slow_api()
+    engine = engine_for(store, settings, {"api": transport})
+    drive = asyncio.create_task(engine.start(wf(SLOW_BRANCH_YAML, tmp_path)))
+    await entered.wait()
+    drive.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await drive
+
+    assert step_tasks() == []
+    [run] = store.list_runs()
+    assert run.status is RunStatus.RUNNING and store.is_stale(run)  # like a stopped process
+    assert "run.failed" not in [e.type for e in store.get_events(run.run_id)]
+
+    delay[0] = 0
+    run = await engine.resume(run.run_id)
+    assert run.status is RunStatus.WAITING_APPROVAL
+    assert store.get_step(run.run_id, "slow").status is S.SUCCEEDED
