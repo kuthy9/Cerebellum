@@ -154,6 +154,40 @@ def test_run_rejects_invalid_json_and_params(runner):
     assert unknown.exit_code == 2 and "params.nope" in unknown.text
 
 
+def test_param_values_are_json_or_the_literal_string():
+    """Review finding: YAML parsing turned `no` into False, `on` into True and `010` into 8."""
+    params = cli._parse_params(
+        [
+            "answer=no",
+            "switch=on",
+            "code=010",
+            "limit=1000",
+            "ratio=0.5",
+            "flag=true",
+            "nothing=null",
+            'quoted="no"',
+            'object={"a": [1, 2]}',
+            "text=hello world",
+            "empty=",
+            "eq=a=b",
+        ]
+    )
+    assert params == {
+        "answer": "no",
+        "switch": "on",
+        "code": "010",
+        "limit": 1000,
+        "ratio": 0.5,
+        "flag": True,
+        "nothing": None,
+        "quoted": "no",
+        "object": {"a": [1, 2]},
+        "text": "hello world",
+        "empty": "",
+        "eq": "a=b",
+    }
+
+
 def test_param_override_changes_the_approval_threshold(runner):
     result = invoke(
         runner,

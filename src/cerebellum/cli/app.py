@@ -16,7 +16,6 @@ from typing import Annotated, Any, NoReturn
 
 import typer
 import uvicorn
-import yaml
 from dotenv import load_dotenv
 from rich.console import Console, RenderableType
 from rich.live import Live
@@ -224,13 +223,22 @@ def _parse_input(raw: str) -> dict[str, Any]:
     return data
 
 
+def _param_value(text: str) -> Any:
+    """A JSON value (number, true/false/null, "quoted string", object, array); anything else
+    is kept as the literal string, so `no`, `on` and `010` stay text."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
 def _parse_params(items: list[str]) -> dict[str, Any]:
     params: dict[str, Any] = {}
     for item in items:
         key, sep, value = item.partition("=")
         if not sep or not key.strip():
             _fail(f"invalid --param {item!r}; use key=value", EXIT_INVALID)
-        params[key.strip()] = yaml.safe_load(value) if value else ""
+        params[key.strip()] = _param_value(value)
     return params
 
 
@@ -429,7 +437,11 @@ def run(
     ] = "{}",
     param: Annotated[
         list[str] | None,
-        typer.Option("--param", "-p", help="Override a workflow param (key=value)."),
+        typer.Option(
+            "--param",
+            "-p",
+            help="Override a workflow param (key=value; a JSON value, otherwise text).",
+        ),
     ] = None,
     mock: Annotated[bool, typer.Option("--mock", help="Use the offline mock AI provider.")] = False,
     sandbox: Annotated[
