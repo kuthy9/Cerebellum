@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 import time
 from collections.abc import Callable, Mapping
 from pathlib import Path
@@ -21,9 +22,20 @@ from cerebellum.connectors.base import (
 SANDBOX_DSN = "sandbox"
 T = TypeVar("T")
 
+# One lock per sandbox file in this process: connectors of different pools (concurrent runs)
+# may open the same file, and only one of them may create and seed it.
+_FILE_LOCKS: dict[Path, threading.Lock] = {}
+_FILE_LOCKS_GUARD = threading.Lock()
+
 
 def sandbox_db_path(home: Path, connector_name: str) -> Path:
     return home / f"sandbox_{connector_name}.db"
+
+
+def _file_lock(path: Path) -> threading.Lock:
+    key = path.resolve()
+    with _FILE_LOCKS_GUARD:
+        return _FILE_LOCKS.setdefault(key, threading.Lock())
 
 
 def to_pyformat(sql: str) -> str:
@@ -72,31 +84,35 @@ class SqliteSandboxConnector(SqlConnector):
 
     async def open(self) -> None:
         if self._conn is None:
-            self._conn = await asyncio.to_thread(self._open_sync)
+            await self._run(lambda conn: None)
 
     def _open_sync(self) -> sqlite3.Connection:
-        fresh = not self.path.exists()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=10.0)
-        conn.row_factory = sqlite3.Row
-        if fresh and self.seed is not None:
-            try:
-                conn.executescript(self.seed.read_text(encoding="utf-8"))
-                conn.commit()
-            except (OSError, sqlite3.Error) as exc:
-                conn.close()
-                self.path.unlink(missing_ok=True)
-                raise ConnectorError(
-                    f"cannot seed sandbox database from {self.seed}: {exc}",
-                    retryable=False,
-                    kind="seed",
-                ) from exc
+        # Held from the existence check to the end of seeding (or the removal of a file whose
+        # seeding failed), so no other connector of this file seeds it again, uses it
+        # half-seeded or loses it while in use.
+        with _file_lock(self.path):
+            fresh = not self.path.exists()
+            conn = sqlite3.connect(str(self.path), check_same_thread=False, timeout=10.0)
+            conn.row_factory = sqlite3.Row
+            if fresh and self.seed is not None:
+                try:
+                    conn.executescript(self.seed.read_text(encoding="utf-8"))
+                    conn.commit()
+                except (OSError, sqlite3.Error) as exc:
+                    conn.close()
+                    self.path.unlink(missing_ok=True)
+                    raise ConnectorError(
+                        f"cannot seed sandbox database from {self.seed}: {exc}",
+                        retryable=False,
+                        kind="seed",
+                    ) from exc
         return conn
 
     async def close(self) -> None:
-        if self._conn is not None:
+        async with self._lock:  # an abandoned operation may still be opening or using it
             conn, self._conn = self._conn, None
-            async with self._lock:  # an abandoned operation may still be using it
+            if conn is not None:
                 await asyncio.to_thread(conn.close)
 
     async def query(self, sql: str, params: Mapping[str, Any]) -> list[dict[str, Any]]:
@@ -119,12 +135,10 @@ class SqliteSandboxConnector(SqlConnector):
         return await self._run(op)
 
     async def _run(self, op: Callable[[sqlite3.Connection], T]) -> T:
-        await self.open()
-        assert self._conn is not None
         await self._lock.acquire()
         # Held until the thread finishes, not until the caller stops waiting: a step timeout
-        # cancels the caller, but the thread goes on using the shared connection.
-        work = asyncio.ensure_future(asyncio.to_thread(op, self._conn))
+        # cancels the caller, but the thread goes on opening (seeding) or using the connection.
+        work = asyncio.ensure_future(asyncio.to_thread(self._call, op))
         work.add_done_callback(self._release)
         try:
             return await asyncio.shield(work)
@@ -133,6 +147,11 @@ class SqliteSandboxConnector(SqlConnector):
             raise ConnectorError(f"sqlite error: {exc}", retryable=transient, kind="sql") from exc
         except sqlite3.Error as exc:
             raise ConnectorError(f"sqlite error: {exc}", retryable=False, kind="sql") from exc
+
+    def _call(self, op: Callable[[sqlite3.Connection], T]) -> T:
+        if self._conn is None:  # opened under the operation lock: see _run
+            self._conn = self._open_sync()
+        return op(self._conn)
 
     def _release(self, work: asyncio.Future[Any]) -> None:
         self._lock.release()

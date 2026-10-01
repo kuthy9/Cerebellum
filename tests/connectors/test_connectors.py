@@ -152,6 +152,63 @@ async def test_sandbox_close_waits_for_an_abandoned_operation(tmp_path, seed_fil
     assert order == ["slow started", "slow finished"]
 
 
+class SlowSeed:
+    """A seed file whose reading waits until `release` is set, to catch seeding mid-way."""
+
+    def __init__(self, path):
+        self.path = path
+        self.reading, self.release = threading.Event(), threading.Event()
+        self.reads = 0
+
+    def read_text(self, encoding):
+        self.reads += 1
+        self.reading.set()
+        self.release.wait(5)
+        return self.path.read_text(encoding=encoding)
+
+
+COUNT_ORDERS = "SELECT COUNT(*) AS n FROM orders"
+
+
+async def test_sandbox_concurrent_first_operations_wait_for_one_seeding(tmp_path, seed_file):
+    """Parallel first queries, on one connector or on another pool's connector for the same
+    file, neither seed it again nor query it half-seeded: they wait for the seeding."""
+    seed = SlowSeed(seed_file)
+    db = tmp_path / "s.db"
+    connector = SqliteSandboxConnector("db", db, seed)
+    other_pool = SqliteSandboxConnector("db", db, seed)
+    first = asyncio.create_task(connector.query(COUNT_ORDERS, {}))
+    await asyncio.to_thread(seed.reading.wait, 5)
+    second = asyncio.create_task(connector.query(COUNT_ORDERS, {}))
+    third = asyncio.create_task(other_pool.query(COUNT_ORDERS, {}))
+    await asyncio.sleep(0.1)
+    assert not second.done() and not third.done()
+    seed.release.set()
+    assert await asyncio.gather(first, second, third) == [[{"n": 2}]] * 3
+    assert seed.reads == 1
+    await connector.close()
+    await other_pool.close()
+
+
+async def test_sandbox_operation_waits_for_an_abandoned_seeding(tmp_path, seed_file):
+    """A step timeout during seeding cancels the caller, not the seeding thread: the next
+    operation waits for it and uses the connection it opened."""
+    seed = SlowSeed(seed_file)
+    connector = SqliteSandboxConnector("db", tmp_path / "s.db", seed)
+    first = asyncio.create_task(connector.query(COUNT_ORDERS, {}))
+    await asyncio.to_thread(seed.reading.wait, 5)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+    following = asyncio.create_task(connector.query(COUNT_ORDERS, {}))
+    await asyncio.sleep(0.1)
+    assert not following.done()
+    seed.release.set()
+    assert await following == [{"n": 2}]
+    assert seed.reads == 1
+    await connector.close()
+
+
 def test_factory_picks_sandbox_or_postgres(tmp_path):
     env = ConnectorEnv(home=tmp_path, base_dir=tmp_path)
     sandbox = create_connector(
