@@ -237,6 +237,20 @@ def test_ui_serves_the_dashboard_on_localhost(runner, monkeypatch):
     assert "no authentication" not in result.text
 
 
+def test_ui_reports_whether_mock_ai_was_requested(runner, monkeypatch):
+    calls = fake_server(monkeypatch)
+    monkeypatch.delenv("CEREBELLUM_MOCK")
+    monkeypatch.setattr("cerebellum.ai.has_anthropic_credentials", lambda *args: False)
+
+    def info():
+        return TestClient(calls["app"], base_url="http://127.0.0.1:7400").get("/api/info").json()
+
+    assert invoke(runner, "ui", "--no-sandbox", "--mock").exit_code == 0
+    assert info()["mock"] is True and info()["mock_requested"] is True
+    assert invoke(runner, "ui", "--no-sandbox").exit_code == 0  # no credentials: mock anyway
+    assert info()["mock"] is True and info()["mock_requested"] is False
+
+
 def test_ui_warns_when_reachable_beyond_this_machine(runner, monkeypatch):
     fake_server(monkeypatch)
     result = invoke(runner, "ui", "--host", "0.0.0.0", "--no-sandbox")

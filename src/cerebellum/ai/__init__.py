@@ -29,6 +29,8 @@ __all__ = [
 class ProviderChoice:
     provider: AIProvider
     reason: str
+    # True when the mock AI was asked for (--mock / CEREBELLUM_MOCK), not a missing-key fallback.
+    mock_requested: bool = False
 
 
 def select_provider(
@@ -39,7 +41,7 @@ def select_provider(
     config_dir: Path | None = None,
 ) -> ProviderChoice:
     if force_mock or settings.force_mock:
-        return ProviderChoice(MockProvider(), "mock AI (requested)")
+        return ProviderChoice(MockProvider(), "mock AI (requested)", mock_requested=True)
     if has_anthropic_credentials(env, config_dir):
         provider = AnthropicProvider(pricing=Pricing.load(settings.pricing_file))
         return ProviderChoice(provider, f"Claude API ({settings.model})")

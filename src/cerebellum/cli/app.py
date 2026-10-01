@@ -767,6 +767,7 @@ def ui(
             settings,
             provider=choice.provider,
             mode=choice.reason,
+            mock_requested=choice.mock_requested,
             workflows_dir=workflows,
             # Bound to this machine: answer only requests addressed to it (DNS rebinding).
             allowed_hosts=LOOPBACK_HOSTS if bind_host in LOOPBACK_HOSTS else None,

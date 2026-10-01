@@ -31,6 +31,7 @@ def client(store, settings, payments):
         settings,
         provider=MockProvider(latency=(0, 0)),
         mode="mock AI (requested)",
+        mock_requested=True,
         workflows_dir=template_path("refund"),
         store=store,
         http_transports={"payments": httpx.ASGITransport(app=create_payments_app(payments))},
@@ -66,7 +67,21 @@ def start(client, name):
 def test_info_reports_mock_mode(client):
     info = client.get("/api/info").json()
     assert info["mock"] is True and info["mode"] == "mock AI (requested)"
+    assert info["mock_requested"] is True
     assert info["version"] == "0.2.0"
+
+
+def test_info_tells_a_mock_fallback_from_a_requested_mock(store, settings, tmp_path):
+    app = create_app(
+        settings,
+        provider=MockProvider(latency=(0, 0)),
+        mode="mock AI (no Anthropic credentials found)",
+        workflows_dir=tmp_path,
+        store=store,
+    )
+    with TestClient(app) as c:
+        info = c.get("/api/info").json()
+    assert info["mock"] is True and info["mock_requested"] is False
 
 
 def test_small_refund_runs_in_the_background(client, store):

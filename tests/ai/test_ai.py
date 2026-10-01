@@ -223,6 +223,21 @@ def test_select_provider(tmp_path):
     assert fallback.provider.mock and "no Anthropic credentials" in fallback.reason
 
 
+def test_select_provider_says_whether_mock_was_requested(tmp_path):
+    settings = Settings.from_env({"CEREBELLUM_HOME": str(tmp_path)})
+    no_profile = tmp_path / "no-profile"
+    key = {"ANTHROPIC_API_KEY": "k"}
+    flag = select_provider(settings, force_mock=True, env=key, config_dir=no_profile)
+    env_var = select_provider(
+        Settings.from_env({"CEREBELLUM_MOCK": "1"}), env=key, config_dir=no_profile
+    )
+    assert flag.mock_requested is True and env_var.mock_requested is True
+    real = select_provider(settings, env=key, config_dir=no_profile)
+    no_credentials = select_provider(settings, env={}, config_dir=no_profile)
+    assert real.mock_requested is False
+    assert no_credentials.provider.mock and no_credentials.mock_requested is False
+
+
 @pytest.mark.live
 async def test_live_claude_structured_output():
     prompt = 'Return {"eligible": true, "risk": "low"}.'

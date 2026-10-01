@@ -122,13 +122,15 @@ def create_app(
     provider: AIProvider,
     mode: str,
     workflows_dir: Path,
+    mock_requested: bool = False,
     store: Store | None = None,
     http_transports: Mapping[str, httpx.AsyncBaseTransport] | None = None,
     static_dir: Path = STATIC_DIR,
     allowed_hosts: Collection[str] | None = None,
 ) -> FastAPI:
     """Build the dashboard app. Without `store`, the app opens and closes its own. With
-    `allowed_hosts`, requests addressed to any other host name are refused."""
+    `allowed_hosts`, requests addressed to any other host name are refused. `mock_requested`
+    tells the UI the mock AI was asked for, so it does not suggest setting an API key."""
 
     @contextlib.asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -187,6 +189,7 @@ def create_app(
             "version": __version__,
             "mode": mode,
             "mock": provider.mock,
+            "mock_requested": mock_requested,
             "model": settings.model,
         }
 

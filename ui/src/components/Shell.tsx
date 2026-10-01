@@ -2,6 +2,7 @@ import { useQuery } from "@tanstack/react-query";
 import { NavLink, Outlet } from "react-router";
 import { api } from "../api";
 import { useEventStream } from "../hooks/useEventStream";
+import { mockNotice } from "../lib/info";
 
 const NAV = [
   { to: "/", label: "Overview", end: true, badge: null },
@@ -15,6 +16,7 @@ export function Shell() {
   const live = useEventStream();
   const info = useQuery({ queryKey: ["info"], queryFn: api.info, staleTime: Infinity });
   const metrics = useQuery({ queryKey: ["metrics", "24h"], queryFn: () => api.metrics("24h") });
+  const notice = info.data ? mockNotice(info.data) : null;
   return (
     <div className="flex h-full">
       <aside className="flex w-52 shrink-0 flex-col border-r border-line">
@@ -52,11 +54,7 @@ export function Shell() {
         </div>
       </aside>
       <main className="min-w-0 flex-1 overflow-auto">
-        {info.data?.mock && (
-          <div className="border-b border-line px-6 py-1.5 text-[11.5px] text-wait">
-            {info.data.mode} — AI steps return the outputs from each step's mock rules; set ANTHROPIC_API_KEY to use Claude.
-          </div>
-        )}
+        {notice && <div className="border-b border-line px-6 py-1.5 text-[11.5px] text-wait">{notice}</div>}
         <Outlet />
       </main>
     </div>
