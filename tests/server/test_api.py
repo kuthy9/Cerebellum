@@ -311,6 +311,15 @@ def test_paths_the_filesystem_rejects_fall_back_to_the_ui(store, settings, tmp_p
         assert page.status_code == 200 and "<title>ui</title>" in page.text
 
 
+def test_over_long_paths_fall_back_to_the_ui(store, settings, tmp_path):
+    """Review finding: a segment longer than any file name (ENAMETOOLONG) answered 500."""
+    app = app_with(store, settings, tmp_path, make_static(tmp_path))
+    with TestClient(app, raise_server_exceptions=False) as c:
+        for path in ("/" + "a" * 5000, "/runs/" + "b" * 5000 + "/steps"):
+            page = c.get(path)
+            assert page.status_code == 200 and "<title>ui</title>" in page.text, page.status_code
+
+
 def test_explains_how_to_build_a_missing_ui(store, settings, tmp_path):
     with TestClient(app_with(store, settings, tmp_path, tmp_path / "not-built")) as c:
         page = c.get("/")

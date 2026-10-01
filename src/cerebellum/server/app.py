@@ -375,9 +375,10 @@ def create_app(
         index = root / "index.html"
         try:
             candidate = (root / path).resolve()
-        except ValueError:
-            candidate = None  # a name no file can have, e.g. one with a NUL byte
-        found = path and candidate and candidate.is_file() and root in candidate.parents
+            found = bool(path) and candidate.is_file() and root in candidate.parents
+        except (ValueError, OSError):
+            # a name no file can have, e.g. one with a NUL byte or a segment that is too long
+            found = False
         if found and candidate != index:
             return FileResponse(candidate)
         if index.is_file():
