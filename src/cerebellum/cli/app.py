@@ -989,12 +989,6 @@ def demo(
     """Run five refund scenarios end to end against the local sandbox. Resets the orders_db
     sandbox database in CEREBELLUM_HOME to the template's seed data first."""
     settings = _settings()
-    # The demo always starts from the seed data. The file is the sandbox database of every
-    # workflow's orders_db connector in this home (the waiting demo run resumes against it
-    # through `cerebellum approve`), so say so when one is replaced.
-    orders_db = sandbox_db_path(settings.home, DEMO_SANDBOX_CONNECTOR)
-    reset = orders_db.exists()
-    orders_db.unlink(missing_ok=True)
     handle = _start_sandbox(settings, "never")
     try:
         with Store(settings.db_path) as store:
@@ -1002,6 +996,13 @@ def demo(
             env = {**os.environ, "ORDERS_DSN": "sandbox", SANDBOX_URL_ENV: handle.url}
             workflow = load_workflow(template_path("refund") / "workflow.yaml", env=env)
             engine = Engine(store, settings, choice.provider)
+            # The demo always starts from the seed data. The file is the sandbox database of
+            # every workflow's orders_db connector in this home (the waiting demo run resumes
+            # against it through `cerebellum approve`), so say so when one is replaced. Only
+            # now that everything above started: a demo that cannot start leaves it alone.
+            orders_db = sandbox_db_path(settings.home, DEMO_SANDBOX_CONNECTOR)
+            reset = orders_db.exists()
+            orders_db.unlink(missing_ok=True)
             console.print(render.header("demo · refund_request", choice.reason))
             if reset:
                 console.print(

@@ -73,3 +73,21 @@ def test_demo_says_it_reset_the_shared_sandbox_database(runner, tmp_path):
     assert again.exit_code == 0, again.stdout
     assert f"reset the sandbox database {path}" in again.stdout
     assert "orders_db" in again.stdout
+
+
+def test_a_demo_that_cannot_start_keeps_the_sandbox_database(runner, tmp_path):
+    """Review finding: the demo deleted the orders_db sandbox database before it started the
+    sandbox and opened the store, and printed its reset notice only once they had succeeded:
+    when one of them failed the file was gone without a word."""
+    home = tmp_path / "home"
+    path = sandbox_db_path(home, "orders_db")
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"the user's sandbox data")
+    db_path = Settings.from_env({"CEREBELLUM_HOME": str(home)}).db_path
+    db_path.write_bytes(b"this is not a SQLite database" * 100)
+    result = runner.invoke(cli.app, ["demo"])
+    text = result.stdout + (result.stderr or "")
+    assert result.exit_code == 1, text
+    assert "cannot use the Cerebellum database" in text
+    assert "reset" not in text
+    assert path.read_bytes() == b"the user's sandbox data"
