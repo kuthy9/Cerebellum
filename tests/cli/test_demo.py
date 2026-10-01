@@ -8,6 +8,7 @@ from cerebellum.cli import app as cli
 from cerebellum.cli import render
 from cerebellum.cli.demo import SCENARIOS
 from cerebellum.config import Settings
+from cerebellum.connectors.postgres import sandbox_db_path
 from cerebellum.runtime.store import Store
 
 
@@ -58,3 +59,17 @@ def test_demo_runs_five_scenarios_with_mock_ai(runner, tmp_path):
 
     again = runner.invoke(cli.app, ["demo"])  # the sandbox database is rebuilt each time
     assert again.exit_code == 0, again.stdout
+
+
+def test_demo_says_it_reset_the_shared_sandbox_database(runner, tmp_path):
+    """Review finding: the demo replaced the orders_db sandbox database, which every workflow
+    with a sandbox connector named orders_db shares, without a word."""
+    path = sandbox_db_path(tmp_path / "home", "orders_db")
+    first = runner.invoke(cli.app, ["demo"])
+    assert first.exit_code == 0, first.stdout
+    assert "reset" not in first.stdout  # nothing existed, nothing was reset
+    assert path.exists()
+    again = runner.invoke(cli.app, ["demo"])
+    assert again.exit_code == 0, again.stdout
+    assert f"reset the sandbox database {path}" in again.stdout
+    assert "orders_db" in again.stdout

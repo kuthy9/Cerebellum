@@ -64,6 +64,8 @@ err_console = Console(stderr=True, highlight=False)
 EXIT_OK, EXIT_FAILED, EXIT_INVALID, EXIT_WAITING = 0, 1, 2, 3
 # The variable the packaged refund template reads for its payments API base URL.
 SANDBOX_URL_ENV = "PAYMENTS_URL"
+# The refund template's database connector; `cerebellum demo` resets its sandbox database.
+DEMO_SANDBOX_CONNECTOR = "orders_db"
 DEFAULT_USER = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
 REFUND_TEMPLATE_FILES = (
     "workflow.yaml",
@@ -842,10 +844,15 @@ def demo(
         bool, typer.Option("--live", help="Use the real Claude API instead of the offline mock AI.")
     ] = False,
 ) -> None:
-    """Run five refund scenarios end to end against the local sandbox."""
+    """Run five refund scenarios end to end against the local sandbox. Resets the orders_db
+    sandbox database in CEREBELLUM_HOME to the template's seed data first."""
     settings = _settings()
-    # The demo always starts from the seed data; this file is the demo's own sandbox database.
-    sandbox_db_path(settings.home, "orders_db").unlink(missing_ok=True)
+    # The demo always starts from the seed data. The file is the sandbox database of every
+    # workflow's orders_db connector in this home (the waiting demo run resumes against it
+    # through `cerebellum approve`), so say so when one is replaced.
+    orders_db = sandbox_db_path(settings.home, DEMO_SANDBOX_CONNECTOR)
+    reset = orders_db.exists()
+    orders_db.unlink(missing_ok=True)
     handle = _start_sandbox(settings, "never")
     try:
         with Store(settings.db_path) as store:
@@ -854,6 +861,18 @@ def demo(
             workflow = load_workflow(template_path("refund") / "workflow.yaml", env=env)
             engine = Engine(store, settings, choice.provider)
             console.print(render.header("demo · refund_request", choice.reason))
+            if reset:
+                console.print(
+                    Text("↺ ", style="yellow") + Text(f"reset the sandbox database {orders_db}"),
+                    soft_wrap=True,
+                )
+                console.print(
+                    Text(
+                        f"  shared by every workflow's sandbox connector named "
+                        f"{DEMO_SANDBOX_CONNECTOR}; it now holds the refund seed data",
+                        style=render.MUTED,
+                    )
+                )
             console.print(Rule(style=render.MUTED))
             results = asyncio.run(
                 run_scenarios(
