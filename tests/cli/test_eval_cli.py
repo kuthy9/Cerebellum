@@ -1,11 +1,14 @@
 import re
 
+import httpx
 import pytest
 from rich.console import Console
 from typer.testing import CliRunner
 
 from cerebellum.cli import app as cli
 from cerebellum.cli import render
+from cerebellum.evals.lock import EvalLock
+from cerebellum.sandbox.server import start_sandbox
 from cerebellum.templates import template_path
 
 WORKFLOW = template_path("refund") / "workflow.yaml"
@@ -129,6 +132,40 @@ def test_eval_warns_when_a_connector_is_not_the_sandbox(runner, tmp_path, monkey
     result = invoke(runner, "eval", path)
     assert result.exit_code == 0, result.text
     assert "payments → http://127.0.0.1:1 is not the sandbox payments API" in result.text
+
+
+def test_eval_says_when_it_reuses_a_sandbox_another_process_started(runner, tmp_path, free_port):
+    """Review finding: an eval silently switched the fail modes of the dashboard's sandbox."""
+    dashboard_sandbox = start_sandbox("127.0.0.1", free_port)
+    try:
+        result = invoke(runner, "eval", write_suite(tmp_path))
+    finally:
+        dashboard_sandbox.stop()
+    assert result.exit_code == 0, result.text
+    assert f"reusing the sandbox payments API at http://127.0.0.1:{free_port}" in result.text
+    assert "runs started there meanwhile" in result.text
+
+
+def test_eval_owning_its_sandbox_says_nothing_about_reuse(runner, tmp_path):
+    result = invoke(runner, "eval", write_suite(tmp_path))
+    assert result.exit_code == 0, result.text
+    assert "reusing the sandbox" not in result.text
+
+
+def test_a_second_eval_in_the_same_home_is_refused(runner, tmp_path, free_port):
+    """Review finding: concurrent evals interleaved one sandbox's fail modes, and the first to
+    finish stopped the sandbox under the other."""
+    shared = start_sandbox("127.0.0.1", free_port, "always")  # the first eval, mid-case
+    try:
+        with EvalLock(tmp_path / "home"):
+            result = invoke(runner, "eval", write_suite(tmp_path))
+        assert httpx.get(f"{shared.url}/health").json()["fail_mode"] == "always"
+    finally:
+        shared.stop()
+    assert result.exit_code == 1, result.text
+    assert "another `cerebellum eval` is running in" in result.text
+    assert "passed" not in result.text
+    assert invoke(runner, "eval", write_suite(tmp_path)).exit_code == 0
 
 
 def test_runs_leaves_eval_runs_out_unless_asked(runner, tmp_path):

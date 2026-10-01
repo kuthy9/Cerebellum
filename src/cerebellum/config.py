@@ -28,6 +28,8 @@ DEFAULT_STREAM_POLL_SECONDS = 0.5
 DEFAULT_UI_SHUTDOWN_GRACE_SECONDS = 2.0
 # `cerebellum eval`: the share of cases that must pass for exit code 0 (spec: --min-pass 0.9).
 DEFAULT_EVAL_MIN_PASS = 0.9
+# The file in CEREBELLUM_HOME that `cerebellum eval` holds a lock on: one eval at a time per home.
+EVAL_LOCK_FILE = "eval.lock"
 # `cerebellum new`: model attempts per draft — the first reply plus repairs from loader issues.
 DEFAULT_NEW_ATTEMPTS = 3
 

@@ -378,6 +378,15 @@ def eval_targets(targets: Sequence[Target]) -> Group:
     return Group(*lines)
 
 
+def sandbox_reused(url: str) -> Text:
+    """The eval borrows a sandbox another process (e.g. `cerebellum ui`) started."""
+    return Text("! ", style="yellow") + Text(
+        f"reusing the sandbox payments API at {url} (another process started it, e.g. "
+        "cerebellum ui): runs started there meanwhile also see this eval's fail modes",
+        style="yellow",
+    )
+
+
 def eval_case_line(result: EvalResultRecord) -> Group:
     glyph, style = ("●", "green") if result.passed else ("✕", "red")
     line = Text()

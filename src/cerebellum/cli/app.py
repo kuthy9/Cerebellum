@@ -35,6 +35,7 @@ from cerebellum.connectors import ConnectorEnv, HealthStatus, create_connector
 from cerebellum.connectors.postgres import sandbox_db_path
 from cerebellum.errors import CerebellumError, LeaseUnavailable, SpecError, StepError
 from cerebellum.evals import EvalRunner, LoadedSuite, load_suite
+from cerebellum.evals.lock import EvalBusy, EvalLock
 from cerebellum.evals.targets import connector_targets
 from cerebellum.runtime.engine import Engine, load_run_workflow
 from cerebellum.runtime.states import RunStatus
@@ -202,6 +203,20 @@ def _sandbox(settings: Settings, fail: str, *, enabled: bool) -> Iterator[Sandbo
         if not configured:
             os.environ.pop(SANDBOX_URL_ENV, None)
         handle.stop()
+
+
+@contextlib.contextmanager
+def _eval_lock(settings: Settings) -> Iterator[None]:
+    """Hold this home's eval lock for one command, or stop at once if another eval holds it."""
+    lock = EvalLock(settings.home)
+    try:
+        lock.acquire()
+    except EvalBusy as exc:
+        _fail(str(exc))
+    try:
+        yield
+    finally:
+        lock.release()
 
 
 def _parse_input(raw: str) -> dict[str, Any]:
@@ -794,7 +809,7 @@ def eval_suite(
 ) -> None:
     """Run an eval suite: one run per case, checked and compared with the previous run."""
     settings = _settings()
-    with _sandbox(settings, "never", enabled=not no_sandbox) as handle:
+    with _eval_lock(settings), _sandbox(settings, "never", enabled=not no_sandbox) as handle:
         loaded = _load_suite(suite)  # after the sandbox starts: connector URLs may point at it
         choice = select_provider(settings, force_mock=mock or loaded.suite.defaults.mock)
         with Store(settings.db_path) as store:
@@ -809,6 +824,8 @@ def eval_suite(
             )
             targets = connector_targets(loaded.workflow, handle.url if handle else None)
             console.print(render.eval_targets(targets))
+            if handle is not None and not handle.owned:
+                console.print(render.sandbox_reused(handle.url))
             console.print(Rule(style=render.MUTED))
             record = asyncio.run(
                 runner.run(
