@@ -210,6 +210,26 @@ def test_hints_leave_out_the_sandbox_when_the_run_does_not_call_it(runner, tmp_p
         assert "--sandbox" not in text
 
 
+def test_hints_leave_out_the_sandbox_for_a_payments_url_default_elsewhere(
+    runner, tmp_path, monkeypatch
+):
+    """Review finding: the hint resolved PAYMENTS_URL as --sandbox would set it, so a connector
+    whose default is a real API got --sandbox, and following the hint sent the refund to the
+    throwaway sandbox while reporting success."""
+    monkeypatch.delenv("PAYMENTS_URL")
+    flow = tmp_path / "real_api.yaml"
+    flow.write_text(
+        ENV_FLOW.replace("${CEREBELLUM_TEST_API_URL}", "${PAYMENTS_URL:-http://127.0.0.1:9}"),
+        encoding="utf-8",
+    )
+    started = invoke(runner, "run", str(flow))
+    assert started.exit_code == 3, started.text
+    run_id = run_id_of(started)
+    for text in (started.text, invoke(runner, "status", run_id).text):
+        assert f"cerebellum approve {run_id} gate --by <you>" in text, text
+        assert "--sandbox" not in text
+
+
 def test_reject_marks_the_run_rejected(runner):
     started = invoke(runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'large.json'}", "--sandbox")
     run_id = run_id_of(started)

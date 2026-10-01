@@ -403,16 +403,15 @@ def _show_run(
 
 def _sandbox_flag(store: Store, run: RunRecord, settings: Settings) -> str:
     """The flag hints add (`--sandbox` after a space, or nothing) to continue `run`: --sandbox
-    when the run's workflow has a REST connector whose base URL, in the environment --sandbox
-    gives it, is this home's sandbox URL (as `cerebellum eval` decides what its sandbox isolates).
-    Continued without it, such a run's payments calls find no API."""
+    when the run's workflow has a REST connector whose base URL, in this environment, is this
+    home's sandbox URL (as `cerebellum eval` decides what its sandbox isolates). Continued
+    without it, such a run's payments calls find no API. The URL is not resolved as --sandbox
+    would set PAYMENTS_URL: that would also flag a connector whose default is a real API, and
+    following the hint would send its calls to the throwaway sandbox."""
     url = sandbox_url(settings.sandbox_host, settings.sandbox_port)
-    env = dict(os.environ)
-    if SANDBOX_URL_ENV not in env:  # as _sandbox does
-        env[SANDBOX_URL_ENV] = url
     try:
         source, base_dir = store.get_workflow_source(run.workflow_digest)
-        workflow = parse_workflow(source, base_dir=base_dir, env=env, require_env=False)
+        workflow = parse_workflow(source, base_dir=base_dir, require_env=False)
     except CerebellumError:  # a snapshot that no longer parses here: no hint about it
         return ""
     targets = connector_targets(workflow, url)
