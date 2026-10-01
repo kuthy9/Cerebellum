@@ -72,3 +72,7 @@ class RunNotFound(NotFound):
 
 class LeaseUnavailable(CerebellumError):
     """Another process currently owns the run."""
+
+
+class ApprovalExpired(CerebellumError):
+    """A decision arrived after the approval's deadline; its on_timeout was applied instead."""

@@ -159,6 +159,28 @@ def test_expired_decision_uses_its_own_event(store, simple_workflow):
     assert store.get_events(run.run_id)[-1].type == "approval.expired"
 
 
+def test_human_decision_after_the_deadline_applies_on_timeout_instead(
+    store, simple_workflow, clock
+):
+    run = start(store, simple_workflow)
+    store.step_transition(run.run_id, "second", StepStatus.RUNNING, event="started", attempts=1)
+    approval = store.request_approval(
+        run.run_id,
+        "second",
+        title="t",
+        context={},
+        expires_at=clock.now() + 60,
+        on_timeout="reject",
+    )
+    clock.advance(60)
+    with pytest.raises(CerebellumError, match=f"approval {approval.id} expired"):
+        store.decide_approval(approval.id, approved=True, by="alice", comment="late")
+    decided = store.get_approval(approval.id)  # committed although the caller got an error
+    assert (decided.status, decided.decided_by) == ("rejected", "system")
+    last = store.get_events(run.run_id)[-1]
+    assert last.type == "approval.expired" and last.data["by"] == "system"
+
+
 def test_tasks_lifecycle(store, simple_workflow):
     run = start(store, simple_workflow)
     task = store.create_task(run.run_id, "rescue", title="Fix it", assignee="ops", payload={"a": 1})

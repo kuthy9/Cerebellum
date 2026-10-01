@@ -138,6 +138,19 @@ steps:
     assert [(a.status, a.decided_by) for a in approvals] == [("approved", "system")] * 2
 
 
+async def test_decision_after_the_deadline_is_refused_and_the_run_follows_on_timeout(
+    store, settings, clock, tmp_path
+):
+    engine = engine_for(store, settings)
+    run = await engine.start(wf(APPROVAL_YAML, tmp_path), {"amount": 900})
+    clock.advance(3601)
+    with pytest.raises(CerebellumError, match="expired"):
+        await engine.decide(run.run_id, approved=True, by="alice")
+    [approval] = store.list_approvals(run_id=run.run_id)
+    assert (approval.status, approval.decided_by) == ("rejected", "system")
+    assert store.get_run(run.run_id).status is RunStatus.REJECTED  # resumed with on_timeout
+
+
 async def test_resume_applies_expiry_by_itself(store, settings, clock, tmp_path):
     engine = engine_for(store, settings)
     run = await engine.start(wf(APPROVAL_YAML, tmp_path), {"amount": 900})

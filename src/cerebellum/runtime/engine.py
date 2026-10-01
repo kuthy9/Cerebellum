@@ -18,6 +18,7 @@ from cerebellum.ai.base import AIProvider
 from cerebellum.config import Settings
 from cerebellum.connectors import ConnectorEnv, ConnectorPool
 from cerebellum.errors import (
+    ApprovalExpired,
     BudgetExceeded,
     CerebellumError,
     LeaseUnavailable,
@@ -168,7 +169,14 @@ class Engine:
             raise CerebellumError(
                 f"run {run_id} has several pending approvals ({names}); specify the step"
             )
-        self.store.decide_approval(matches[0].id, approved=approved, by=by, comment=comment)
+        try:
+            self.store.decide_approval(matches[0].id, approved=approved, by=by, comment=comment)
+        except ApprovalExpired:
+            # on_timeout decided it instead; continue the run from that outcome, then report it.
+            if resume:
+                with contextlib.suppress(LeaseUnavailable):
+                    await self.resume(run_id)
+            raise
         if not resume:
             return self.store.get_run(run_id)
         try:
