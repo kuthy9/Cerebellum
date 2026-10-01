@@ -1,3 +1,4 @@
+import asyncio
 import os
 import re
 from types import SimpleNamespace
@@ -10,10 +11,14 @@ from typer.testing import CliRunner
 
 from cerebellum.cli import app as cli
 from cerebellum.cli import render
-from cerebellum.config import DEFAULT_UI_SHUTDOWN_GRACE_SECONDS
+from cerebellum.config import DEFAULT_UI_SHUTDOWN_GRACE_SECONDS, Settings
 from cerebellum.evals import load_suite
+from cerebellum.runtime.engine import Engine
+from cerebellum.runtime.states import RunStatus
+from cerebellum.runtime.store import Store
 from cerebellum.sandbox.server import sandbox_running
 from cerebellum.server.app import dashboard_server
+from cerebellum.spec import load_workflow
 from cerebellum.templates import template_path
 
 WORKFLOW = str(template_path("refund") / "workflow.yaml")
@@ -120,6 +125,69 @@ def test_reject_marks_the_run_rejected(runner):
     assert '"decision": "rejected"' in rejected.text
 
 
+def test_an_approval_rejected_by_its_timeout_is_not_blamed_on_a_human(runner, tmp_path):
+    """Review finding: on_timeout: reject was reported as "rejected by a human approver"."""
+    started = invoke(runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'large.json'}", "--sandbox")
+    assert started.exit_code == 3, started.text
+    run_id = run_id_of(started)
+    with Store(Settings.from_env().db_path) as store:  # what the engine does once it is due
+        [approval] = store.list_approvals(run_id=run_id)
+        store.decide_approval(
+            approval.id, approved=False, by="system", comment="approval timed out", expired=True
+        )
+    resumed = invoke(runner, "resume", run_id, "--sandbox")
+    assert resumed.exit_code == 1, resumed.text
+    for text in (resumed.text, invoke(runner, "status", run_id).text):
+        assert "approval timed out" in text and "manager_approval" in text
+        assert "human" not in text
+
+
+SIGN_OFF_FLOW = """
+name: sign_off
+steps:
+  - {id: gate, type: approval, title: Sign off}
+  - {id: note, type: validate, needs: [gate], rules: [{expr: "true", message: ok}]}
+"""
+
+
+class FakeClaude:
+    """Stands in for the Claude provider; the workflow above never calls it."""
+
+    name = "claude"
+    mock = False
+
+    async def generate(self, request, messages):  # pragma: no cover - not used
+        raise AssertionError("not expected")
+
+
+def test_a_claude_run_never_continues_on_mock_ai(runner, tmp_path, monkeypatch):
+    """Review finding: approve/reject/resume silently drove a run started with the Claude API
+    on the mock provider when no credentials were available (or CEREBELLUM_MOCK was set)."""
+    flow = tmp_path / "sign_off.yaml"
+    flow.write_text(SIGN_OFF_FLOW, encoding="utf-8")
+    settings = Settings.from_env()
+    with Store(settings.db_path) as store:
+        run = asyncio.run(Engine(store, settings, FakeClaude()).start(load_workflow(flow)))
+    assert run.status is RunStatus.WAITING_APPROVAL and run.mock is False
+
+    for command in ("approve", "reject", "resume"):  # CEREBELLUM_MOCK=1 in this fixture
+        refused = invoke(runner, command, run.run_id)
+        assert refused.exit_code == 1, refused.text
+        assert "started with the Claude API" in refused.text
+        assert "CEREBELLUM_MOCK" in refused.text
+
+    monkeypatch.delenv("CEREBELLUM_MOCK")
+    monkeypatch.setattr("cerebellum.ai.has_anthropic_credentials", lambda *args, **kw: False)
+    refused = invoke(runner, "approve", run.run_id, "--by", "alice")
+    assert refused.exit_code == 1, refused.text
+    assert "started with the Claude API" in refused.text and "ANTHROPIC_API_KEY" in refused.text
+    assert "pending" in invoke(runner, "approvals").text
+
+    recorded = invoke(runner, "approve", run.run_id, "--by", "alice", "--no-resume")
+    assert recorded.exit_code == 3, recorded.text  # recording a decision needs no AI
+    assert "approved by alice" in recorded.text
+
+
 def test_outage_falls_back_to_a_manual_task(runner):
     result = invoke(
         runner,
@@ -155,6 +223,40 @@ def test_run_rejects_invalid_json_and_params(runner):
     assert unknown.exit_code == 2 and "params.nope" in unknown.text
 
 
+def test_param_values_are_json_or_the_literal_string():
+    """Review finding: YAML parsing turned `no` into False, `on` into True and `010` into 8."""
+    params = cli._parse_params(
+        [
+            "answer=no",
+            "switch=on",
+            "code=010",
+            "limit=1000",
+            "ratio=0.5",
+            "flag=true",
+            "nothing=null",
+            'quoted="no"',
+            'object={"a": [1, 2]}',
+            "text=hello world",
+            "empty=",
+            "eq=a=b",
+        ]
+    )
+    assert params == {
+        "answer": "no",
+        "switch": "on",
+        "code": "010",
+        "limit": 1000,
+        "ratio": 0.5,
+        "flag": True,
+        "nothing": None,
+        "quoted": "no",
+        "object": {"a": [1, 2]},
+        "text": "hello world",
+        "empty": "",
+        "eq": "a=b",
+    }
+
+
 def test_param_override_changes_the_approval_threshold(runner):
     result = invoke(
         runner,
@@ -181,6 +283,84 @@ def test_resume_of_a_finished_run_fails_cleanly(runner):
 def test_status_of_unknown_run(runner):
     result = invoke(runner, "status", "r_00000000")
     assert result.exit_code == 1 and "not found" in result.text
+
+
+ENV_FLOW = """
+name: needs_env
+connectors:
+  api: {type: rest, base_url: "${CEREBELLUM_TEST_API_URL}"}
+steps:
+  - {id: gate, type: approval, title: Go ahead}
+  - {id: call, type: http, needs: [gate], connector: api, method: GET, path: /ping}
+"""
+
+
+def test_status_shows_a_run_whose_connector_variables_are_unset(runner, tmp_path, monkeypatch):
+    """Review finding: `status` opens no connector, yet failed when the snapshot's ${VAR}s were
+    unset in this shell. Resuming the run still needs the real values."""
+    flow = tmp_path / "needs_env.yaml"
+    flow.write_text(ENV_FLOW, encoding="utf-8")
+    monkeypatch.setenv("CEREBELLUM_TEST_API_URL", "http://127.0.0.1:9")
+    started = invoke(runner, "run", str(flow))
+    assert started.exit_code == 3, started.text
+    run_id = run_id_of(started)
+    monkeypatch.delenv("CEREBELLUM_TEST_API_URL")
+
+    status = invoke(runner, "status", run_id)
+    assert status.exit_code == 0, status.text
+    assert "gate" in status.text and "call" in status.text and "awaiting approval" in status.text
+    trace = invoke(runner, "trace", run_id)
+    assert trace.exit_code == 0, trace.text
+
+    for command in (("resume", run_id), ("approve", run_id, "--by", "alice")):
+        refused = invoke(runner, *command)
+        assert refused.exit_code == 2, refused.text
+        assert "CEREBELLUM_TEST_API_URL is not set" in refused.text
+    assert invoke(runner, "approvals").text.count(run_id) == 1  # still pending
+
+
+def test_a_bad_pricing_file_is_a_clear_error(runner, tmp_path, monkeypatch):
+    """Review finding: a bad CEREBELLUM_PRICING_FILE ended the CLI with a traceback."""
+    monkeypatch.delenv("CEREBELLUM_MOCK")
+    monkeypatch.setattr("cerebellum.ai.has_anthropic_credentials", lambda *args, **kw: True)
+    prices = tmp_path / "prices.json"
+    prices.write_text("{oops", encoding="utf-8")
+    monkeypatch.setenv("CEREBELLUM_PRICING_FILE", str(prices))
+    result = invoke(runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'small.json'}")
+    assert result.exit_code == 1, result.text
+    assert isinstance(result.exception, SystemExit)  # handled, not a traceback
+    assert "CEREBELLUM_PRICING_FILE" in result.text and "not valid JSON" in result.text
+
+
+def test_a_corrupt_database_is_a_clear_error(runner, tmp_path, monkeypatch):
+    """Review finding: sqlite errors (corrupt or unwritable CEREBELLUM_HOME) were tracebacks."""
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "cerebellum.db").write_bytes(b"this is not a sqlite database" * 100)
+    fake_server(monkeypatch)  # the dashboard checks its database before it serves
+    for command in (("runs",), ("status", "r_00000000"), ("ui", "--no-sandbox", "--mock")):
+        result = invoke(runner, *command)
+        assert result.exit_code == 1, result.text
+        assert isinstance(result.exception, SystemExit)
+        assert str(home / "cerebellum.db") in result.text and "not a database" in result.text
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root ignores directory permissions")
+def test_an_unwritable_home_is_a_clear_error(runner, tmp_path, monkeypatch):
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    locked.chmod(0o500)
+    try:
+        monkeypatch.setenv("CEREBELLUM_HOME", str(locked))
+        result = invoke(runner, "runs")
+        assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.text
+        assert str(locked / "cerebellum.db") in result.text
+        monkeypatch.setenv("CEREBELLUM_HOME", str(locked / "home"))
+        result = invoke(runner, "runs")
+        assert result.exit_code == 1 and isinstance(result.exception, SystemExit), result.text
+        assert "CEREBELLUM_HOME" in result.text and str(locked / "home") in result.text
+    finally:
+        locked.chmod(0o700)
 
 
 def test_runs_rejects_unknown_status(runner):

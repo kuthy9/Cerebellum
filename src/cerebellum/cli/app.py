@@ -7,6 +7,7 @@ import contextlib
 import json
 import os
 import shutil
+import sqlite3
 import threading
 import time
 import webbrowser
@@ -14,14 +15,15 @@ from collections.abc import Awaitable, Callable, Iterator
 from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
+import click
 import typer
 import uvicorn
-import yaml
 from dotenv import load_dotenv
 from rich.console import Console, RenderableType
 from rich.live import Live
 from rich.rule import Rule
 from rich.text import Text
+from typer.core import TyperGroup
 
 from cerebellum import __version__
 from cerebellum.ai import AnthropicProvider, select_provider
@@ -33,7 +35,7 @@ from cerebellum.cli.demo import run_scenarios
 from cerebellum.config import DEFAULT_EVAL_MIN_PASS, Settings, has_anthropic_credentials
 from cerebellum.connectors import ConnectorEnv, HealthStatus, create_connector
 from cerebellum.connectors.postgres import sandbox_db_path
-from cerebellum.errors import CerebellumError, LeaseUnavailable, SpecError, StepError
+from cerebellum.errors import CerebellumError, ConfigError, LeaseUnavailable, SpecError, StepError
 from cerebellum.evals import EvalRunner, LoadedSuite, load_suite
 from cerebellum.evals.targets import connector_targets
 from cerebellum.runtime.engine import Engine, load_run_workflow
@@ -48,11 +50,29 @@ from cerebellum.spec import load_workflow
 from cerebellum.spec.models import Workflow
 from cerebellum.templates import template_path
 
+
+class _CerebellumGroup(TyperGroup):
+    """Runs every command. An unusable configured file (ConfigError) or Cerebellum database
+    (sqlite3.Error) ends the command with a message and exit code 1 instead of a traceback."""
+
+    def invoke(self, ctx: click.Context) -> Any:
+        try:
+            return super().invoke(ctx)
+        except ConfigError as exc:
+            _fail(str(exc))
+        except sqlite3.Error as exc:
+            _fail(
+                f"cannot use the Cerebellum database {Settings.from_env().db_path}: {exc} "
+                "(check CEREBELLUM_HOME)"
+            )
+
+
 app = typer.Typer(
     name="cerebellum",
     help="Reliable, observable, recoverable business workflows.",
     no_args_is_help=True,
     add_completion=False,
+    cls=_CerebellumGroup,
 )
 tasks_app = typer.Typer(help="Manual task inbox (fallback hand-offs).")
 connectors_app = typer.Typer(help="Connector utilities.", no_args_is_help=True)
@@ -65,6 +85,8 @@ err_console = Console(stderr=True, highlight=False)
 EXIT_OK, EXIT_FAILED, EXIT_INVALID, EXIT_WAITING = 0, 1, 2, 3
 # The variable the packaged refund template reads for its payments API base URL.
 SANDBOX_URL_ENV = "PAYMENTS_URL"
+# The refund template's database connector; `cerebellum demo` resets its sandbox database.
+DEMO_SANDBOX_CONNECTOR = "orders_db"
 DEFAULT_USER = os.environ.get("USER") or os.environ.get("USERNAME") or "cli"
 REFUND_TEMPLATE_FILES = (
     "workflow.yaml",
@@ -100,7 +122,10 @@ def main() -> None:
 
 def _settings() -> Settings:
     settings = Settings.from_env()
-    settings.ensure_home()
+    try:
+        settings.ensure_home()
+    except OSError as exc:
+        _fail(f"cannot create CEREBELLUM_HOME {settings.home}: {exc.strerror or exc}")
     return settings
 
 
@@ -145,15 +170,34 @@ def _get_run(store: Store, run_id: str) -> RunRecord:
         _fail(str(exc))
 
 
-def _run_workflow(store: Store, run: RunRecord) -> Workflow:
+def _run_workflow(store: Store, run: RunRecord, *, display_only: bool = False) -> Workflow:
+    """The run's workflow snapshot. Display-only callers open no connector, so they tolerate
+    connector variables that are unset in this shell; driving the run needs their values."""
     try:
-        return load_run_workflow(store, run)
+        return load_run_workflow(store, run, require_env=not display_only)
     except SpecError as exc:
         _invalid("the run's workflow snapshot is invalid in this environment", exc)
 
 
 def _mode(run: RunRecord) -> str:
     return "mock AI" if run.mock else "Claude API"
+
+
+def _run_provider(settings: Settings, run: RunRecord) -> AIProvider:
+    """The provider that continues `run`: mock runs stay on mock AI, and a run started with the
+    Claude API never continues on it."""
+    provider = select_provider(settings, force_mock=run.mock).provider
+    if provider.mock and not run.mock:
+        fix = (
+            "unset CEREBELLUM_MOCK"
+            if settings.force_mock
+            else "set ANTHROPIC_API_KEY or run `ant auth login`"
+        )
+        _fail(
+            f"run {run.run_id} was started with the Claude API and cannot continue on mock AI; "
+            f"{fix}, then try again"
+        )
+    return provider
 
 
 def _exit_code(status: RunStatus) -> int:
@@ -183,6 +227,29 @@ def _draft_provider(settings: Settings) -> AIProvider:
             "set ANTHROPIC_API_KEY or run `ant auth login`"
         )
     return AnthropicProvider(pricing=Pricing.load(settings.pricing_file))
+
+
+def _check_output(output: Path, *, force: bool) -> None:
+    """Refuse an output path `new` could not write to (a directory, an existing file without
+    --force, or a parent it cannot create or write in)."""
+    if output.is_dir():
+        _fail(
+            f"{output} is a directory; pass a file path such as {output / 'workflow.yaml'}",
+            EXIT_INVALID,
+        )
+    if output.exists():
+        if not force:
+            _fail(f"{output} already exists; pass --force to overwrite it", EXIT_INVALID)
+        if not os.access(output, os.W_OK):
+            _fail(f"{output} is not writable", EXIT_INVALID)
+        return
+    existing = output.absolute().parent  # the nearest existing directory is where it is created
+    while not existing.exists():
+        existing = existing.parent
+    if not existing.is_dir():
+        _fail(f"cannot create {output}: {existing} is not a directory", EXIT_INVALID)
+    if not os.access(existing, os.W_OK | os.X_OK):
+        _fail(f"cannot create {output}: {existing} is not writable", EXIT_INVALID)
 
 
 @contextlib.contextmanager
@@ -224,13 +291,22 @@ def _parse_input(raw: str) -> dict[str, Any]:
     return data
 
 
+def _param_value(text: str) -> Any:
+    """A JSON value (number, true/false/null, "quoted string", object, array); anything else
+    is kept as the literal string, so `no`, `on` and `010` stay text."""
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        return text
+
+
 def _parse_params(items: list[str]) -> dict[str, Any]:
     params: dict[str, Any] = {}
     for item in items:
         key, sep, value = item.partition("=")
         if not sep or not key.strip():
             _fail(f"invalid --param {item!r}; use key=value", EXIT_INVALID)
-        params[key.strip()] = yaml.safe_load(value) if value else ""
+        params[key.strip()] = _param_value(value)
     return params
 
 
@@ -293,7 +369,19 @@ def _print_outcome(store: Store, run: RunRecord) -> None:
         console.print(Text("✕ ", style="red") + Text(run.error or "run failed"))
         console.print(Text(f"  fix the cause, then: cerebellum resume {rid}", style=render.MUTED))
     elif run.status is RunStatus.REJECTED:
-        console.print(Text("✕ rejected by a human approver", style="red"))
+        expired = {
+            event.data.get("approval_id")
+            for event in store.get_events(rid)
+            if event.type == "approval.expired"
+        }
+        rejected = store.list_approvals(run_id=rid, status="rejected")
+        if rejected and all(approval.id in expired for approval in rejected):
+            steps = ", ".join(approval.step_id for approval in rejected)
+            console.print(
+                Text(f"✕ approval timed out · {steps} rejected by on_timeout", style="red")
+            )
+        else:
+            console.print(Text("✕ rejected by a human approver", style="red"))
     elif run.status is RunStatus.NEEDS_ATTENTION:
         open_tasks = store.list_tasks(run_id=rid, status="open")
         console.print(
@@ -390,8 +478,7 @@ def new(
 ) -> None:
     """Draft a workflow from a description with Claude; review the draft before running it."""
     settings = _settings()
-    if output.exists() and not force:
-        _fail(f"{output} already exists; pass --force to overwrite it", EXIT_INVALID)
+    _check_output(output, force=force)  # before the provider is created and Claude is paid
     provider = _draft_provider(settings)
     console.print(render.header("new workflow", f"drafting with Claude API ({settings.model})"))
     try:
@@ -405,8 +492,11 @@ def new(
         raise typer.Exit(EXIT_INVALID) from None
     except CerebellumError as exc:
         _fail(str(exc))
-    output.parent.mkdir(parents=True, exist_ok=True)
-    output.write_text(DRAFT_HEADER + draft.yaml.rstrip() + "\n", encoding="utf-8")
+    try:
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_text(DRAFT_HEADER + draft.yaml.rstrip() + "\n", encoding="utf-8")
+    except OSError as exc:  # changed since the check above
+        _fail(f"cannot write {output}: {exc.strerror or exc}")
     wf = draft.workflow
     line = Text("● ", style="green") + Text(str(output), style="bold")
     line.append(
@@ -429,7 +519,11 @@ def run(
     ] = "{}",
     param: Annotated[
         list[str] | None,
-        typer.Option("--param", "-p", help="Override a workflow param (key=value)."),
+        typer.Option(
+            "--param",
+            "-p",
+            help="Override a workflow param (key=value; a JSON value, otherwise text).",
+        ),
     ] = None,
     mock: Annotated[bool, typer.Option("--mock", help="Use the offline mock AI provider.")] = False,
     sandbox: Annotated[
@@ -497,7 +591,7 @@ def status(run_id: Annotated[str, typer.Argument(help="Run id.")]) -> None:
     settings = _settings()
     with Store(settings.db_path) as store:
         run = _get_run(store, run_id)
-        workflow = _run_workflow(store, run)
+        workflow = _run_workflow(store, run, display_only=True)
         steps = store.get_steps(run_id)
         console.print(
             render.run_view(run, workflow, steps, mode=_mode(run), stale=store.is_stale(run))
@@ -550,9 +644,13 @@ def _decide(
         with Store(settings.db_path) as store:
             run = _get_run(store, run_id)
             workflow = _run_workflow(store, run)
-            engine = Engine(
-                store, settings, select_provider(settings, force_mock=run.mock).provider
+            # Recording a decision without resuming calls no AI, so any provider will do.
+            provider = (
+                _run_provider(settings, run)
+                if resume
+                else select_provider(settings, force_mock=run.mock).provider
             )
+            engine = Engine(store, settings, provider)
             try:
                 record = _drive_live(
                     store,
@@ -632,9 +730,7 @@ def resume(
         with Store(settings.db_path) as store:
             run = _get_run(store, run_id)
             workflow = _run_workflow(store, run)
-            engine = Engine(
-                store, settings, select_provider(settings, force_mock=run.mock).provider
-            )
+            engine = Engine(store, settings, _run_provider(settings, run))
             try:
                 record = _drive_live(
                     store, workflow, _mode(run), lambda: engine.resume(run_id), run_id=run_id
@@ -760,6 +856,8 @@ def ui(
             )
         )
     choice = select_provider(settings, force_mock=mock)
+    # The server opens the database while it starts, where a failure is only logged: check here.
+    Store(settings.db_path).close()
     shown = "127.0.0.1" if bind_host in ("0.0.0.0", "::") else bind_host
     url = f"http://[{shown}]:{bind_port}" if ":" in shown else f"http://{shown}:{bind_port}"
     with _sandbox(settings, "never", enabled=not no_sandbox):
@@ -830,10 +928,15 @@ def demo(
         bool, typer.Option("--live", help="Use the real Claude API instead of the offline mock AI.")
     ] = False,
 ) -> None:
-    """Run five refund scenarios end to end against the local sandbox."""
+    """Run five refund scenarios end to end against the local sandbox. Resets the orders_db
+    sandbox database in CEREBELLUM_HOME to the template's seed data first."""
     settings = _settings()
-    # The demo always starts from the seed data; this file is the demo's own sandbox database.
-    sandbox_db_path(settings.home, "orders_db").unlink(missing_ok=True)
+    # The demo always starts from the seed data. The file is the sandbox database of every
+    # workflow's orders_db connector in this home (the waiting demo run resumes against it
+    # through `cerebellum approve`), so say so when one is replaced.
+    orders_db = sandbox_db_path(settings.home, DEMO_SANDBOX_CONNECTOR)
+    reset = orders_db.exists()
+    orders_db.unlink(missing_ok=True)
     handle = _start_sandbox(settings, "never")
     try:
         with Store(settings.db_path) as store:
@@ -842,6 +945,18 @@ def demo(
             workflow = load_workflow(template_path("refund") / "workflow.yaml", env=env)
             engine = Engine(store, settings, choice.provider)
             console.print(render.header("demo · refund_request", choice.reason))
+            if reset:
+                console.print(
+                    Text("↺ ", style="yellow") + Text(f"reset the sandbox database {orders_db}"),
+                    soft_wrap=True,
+                )
+                console.print(
+                    Text(
+                        f"  shared by every workflow's sandbox connector named "
+                        f"{DEMO_SANDBOX_CONNECTOR}; it now holds the refund seed data",
+                        style=render.MUTED,
+                    )
+                )
             console.print(Rule(style=render.MUTED))
             results = asyncio.run(
                 run_scenarios(

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import time
 
@@ -6,8 +7,10 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cerebellum.ai.mock import MockProvider
+from cerebellum.runtime.engine import Engine
 from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments_app
 from cerebellum.server.app import create_app
+from cerebellum.spec import parse_workflow
 from cerebellum.templates import template_path
 
 WORKFLOW_ID = "workflow.yaml"  # the packaged refund template, scanned from its own directory
@@ -59,6 +62,39 @@ def start(client, name):
     response = client.post("/api/runs", json={"workflow": WORKFLOW_ID, "input": sample(name)})
     assert response.status_code == 201, response.text
     return response.json()["run"]["run_id"]
+
+
+class FakeClaude:
+    """Stands in for the Claude provider; the workflow below never calls it."""
+
+    name = "claude"
+    mock = False
+
+    async def generate(self, request, messages):  # pragma: no cover - not used
+        raise AssertionError("not expected")
+
+
+SIGN_OFF = """
+name: sign_off
+steps:
+  - {id: gate, type: approval, title: Sign off}
+  - {id: note, type: validate, needs: [gate], rules: [{expr: "true", message: ok}]}
+"""
+
+
+def test_a_mock_dashboard_refuses_to_continue_a_claude_run(client, store, settings, tmp_path):
+    """Review finding: the dashboard on mock AI silently continued Claude runs on it."""
+    workflow = parse_workflow(SIGN_OFF, base_dir=tmp_path, env={})
+    run = asyncio.run(Engine(store, settings, FakeClaude()).start(workflow))
+    [pending] = store.list_approvals(run_id=run.run_id)
+    decided = client.post(
+        f"/api/approvals/{pending.id}/decision", json={"approved": True, "by": "ui-user"}
+    )
+    assert decided.status_code == 409, decided.text
+    assert "started with the Claude API" in decided.json()["detail"]
+    resumed = client.post(f"/api/runs/{run.run_id}/resume")
+    assert resumed.status_code == 409, resumed.text
+    assert store.get_approval(pending.id).status == "pending"
 
 
 def test_info_reports_mock_mode(client):

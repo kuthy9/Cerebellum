@@ -50,8 +50,14 @@ def load_workflow(path: str | Path, *, env: Mapping[str, str] | None = None) -> 
 
 
 def parse_workflow(
-    text: str, *, base_dir: str | Path = ".", env: Mapping[str, str] | None = None
+    text: str,
+    *,
+    base_dir: str | Path = ".",
+    env: Mapping[str, str] | None = None,
+    require_env: bool = True,
 ) -> Workflow:
+    """With `require_env=False` (for display only: no connector may be opened), an unset
+    connector variable is kept as written instead of being an issue."""
     env = os.environ if env is None else env
     try:
         data = yaml.safe_load(text)
@@ -62,7 +68,9 @@ def parse_workflow(
 
     issues: list[SpecIssue] = []
     if "connectors" in data:
-        data["connectors"] = _interpolate(data["connectors"], env, "connectors", issues)
+        data["connectors"] = _interpolate(
+            data["connectors"], env, "connectors", issues, require_env
+        )
     if issues:
         raise SpecError(issues)
 
@@ -110,7 +118,9 @@ def _untagged(loc: tuple[Any, ...], data: dict[str, Any]) -> tuple[Any, ...]:
     return (*loc[:2], *loc[3:]) if loc[2] == tag else loc
 
 
-def _interpolate(value: Any, env: Mapping[str, str], path: str, issues: list[SpecIssue]) -> Any:
+def _interpolate(
+    value: Any, env: Mapping[str, str], path: str, issues: list[SpecIssue], required: bool
+) -> Any:
     if isinstance(value, str):
 
         def replace(match: re.Match[str]) -> str:
@@ -119,16 +129,22 @@ def _interpolate(value: Any, env: Mapping[str, str], path: str, issues: list[Spe
                 return env[name]
             if default is not None:
                 return default
+            if not required:
+                return match.group(0)
             issues.append(SpecIssue(path, f"environment variable {name} is not set"))
             return ""
 
         return _ENV_REF.sub(replace, value)
     if isinstance(value, dict):
         return {
-            key: _interpolate(item, env, f"{path}.{key}", issues) for key, item in value.items()
+            key: _interpolate(item, env, f"{path}.{key}", issues, required)
+            for key, item in value.items()
         }
     if isinstance(value, list):
-        return [_interpolate(item, env, f"{path}[{i}]", issues) for i, item in enumerate(value)]
+        return [
+            _interpolate(item, env, f"{path}[{i}]", issues, required)
+            for i, item in enumerate(value)
+        ]
     return value
 
 

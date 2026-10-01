@@ -5,6 +5,7 @@ import pytest
 
 from cerebellum.ai.mock import MockProvider
 from cerebellum.errors import CerebellumError, LeaseUnavailable, NotFound, RunNotFound, SpecError
+from cerebellum.runtime.engine import Engine
 from cerebellum.runtime.states import RunStatus
 from cerebellum.server.worker import Worker
 from cerebellum.spec import parse_workflow
@@ -152,6 +153,24 @@ async def test_background_sweeper_runs_until_stopped(store, settings, clock, wf)
         await asyncio.sleep(0.01)
     await worker.stop()
     assert store.get_run(record.run_id).status is RunStatus.REJECTED
+
+
+async def test_a_claude_run_is_never_continued_on_mock_ai(worker, store, settings, clock, wf):
+    """Review finding: a dashboard without Anthropic credentials (so on mock AI) silently drove
+    runs started with the Claude API on the mock provider."""
+    run = await Engine(store, settings, FakeClaude()).start(wf, {"amount": 900})
+    assert run.status is RunStatus.WAITING_APPROVAL and run.mock is False
+    [pending] = store.list_approvals(status="pending")
+    with pytest.raises(CerebellumError, match="started with the Claude API") as info:
+        await worker.decide(pending.id, approved=True, by="ui-user")
+    assert not isinstance(info.value, NotFound)  # the API answers 409
+    with pytest.raises(CerebellumError, match="started with the Claude API"):
+        worker.resume(run.run_id)
+    clock.advance(3601)
+    assert worker.sweep() == []
+    await worker.drain()
+    assert store.get_approval(pending.id).status == "pending"
+    assert store.get_run(run.run_id).status is RunStatus.WAITING_APPROVAL
 
 
 def test_mock_runs_use_a_mock_provider_even_on_a_claude_server(store, settings):

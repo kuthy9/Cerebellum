@@ -11,6 +11,7 @@ from cerebellum.ai.base import AIError, AIRequest, Usage
 from cerebellum.ai.mock import MockProvider
 from cerebellum.ai.pricing import DEFAULT_PRICES, ModelPrice, Pricing
 from cerebellum.config import Settings
+from cerebellum.errors import ConfigError
 from cerebellum.spec.models import MockRule
 
 SCHEMA = {
@@ -47,6 +48,28 @@ def test_pricing_file_override(tmp_path):
     assert pricing.cost("claude-opus-5-5", Usage(input_tokens=1_000_000)) == pytest.approx(1.0)
     assert pricing.cost("custom", Usage(output_tokens=1_000_000)) == pytest.approx(4.0)
     assert Pricing.load(None).prices == DEFAULT_PRICES
+
+
+@pytest.mark.parametrize(
+    ("content", "problem"),
+    [
+        (None, "cannot read"),
+        ("{oops", "is not valid JSON"),
+        ("[1, 2]", "must be a JSON object"),
+        ('{"m": 4}', "'m' needs"),
+        ('{"m": {"output": 2}}', "'m' needs"),
+        ('{"m": {"input": "cheap", "output": 2}}', "'m' needs"),
+        ('{"m": {"input": 1, "output": 2, "cache_read": "x"}}', "'m' needs"),
+    ],
+)
+def test_a_bad_pricing_file_is_a_config_error(tmp_path, content, problem):
+    """Review finding: a bad CEREBELLUM_PRICING_FILE surfaced as a raw Python exception."""
+    path = tmp_path / "prices.json"
+    if content is not None:
+        path.write_text(content, encoding="utf-8")
+    with pytest.raises(ConfigError, match=problem) as info:
+        Pricing.load(path)
+    assert "CEREBELLUM_PRICING_FILE" in str(info.value) and str(path) in str(info.value)
 
 
 def request(**overrides):

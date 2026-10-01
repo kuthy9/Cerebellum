@@ -6,8 +6,10 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from cerebellum.ai.base import Usage
+from cerebellum.errors import ConfigError
 
 
 @dataclass(frozen=True)
@@ -45,19 +47,46 @@ class Pricing:
 
     @classmethod
     def load(cls, path: Path | None) -> Pricing:
+        """Defaults plus the prices in `path`; raises ConfigError when the file is unusable."""
         pricing = cls()
         if path is None:
             return pricing
-        data = json.loads(path.read_text(encoding="utf-8"))
+        where = f"CEREBELLUM_PRICING_FILE {path}"
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except OSError as exc:
+            raise ConfigError(f"cannot read {where}: {exc.strerror or exc}") from exc
+        except ValueError as exc:  # invalid JSON or not UTF-8
+            raise ConfigError(f"{where} is not valid JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise ConfigError(f"{where} must be a JSON object that maps model names to prices")
         for model, entry in data.items():
-            pricing.prices[model] = ModelPrice(
-                float(entry["input"]),
-                float(entry["output"]),
-                entry.get("cache_read"),
-                entry.get("cache_write"),
-            )
+            try:
+                pricing.prices[model] = _model_price(entry)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise ConfigError(
+                    f"{where}: {model!r} needs numeric input and output prices per million "
+                    'tokens (optional: cache_read, cache_write), e.g. {"input": 4.0, '
+                    '"output": 20.0}'
+                ) from exc
         return pricing
 
     def cost(self, model: str, usage: Usage) -> float:
         price = self.prices.get(model)
         return price.cost(usage) if price else 0.0
+
+
+def _model_price(entry: Any) -> ModelPrice:
+    if not isinstance(entry, dict):
+        raise TypeError("a model's prices must be a JSON object")
+
+    def optional(key: str) -> float | None:
+        value = entry.get(key)
+        return None if value is None else float(value)
+
+    return ModelPrice(
+        float(entry["input"]),
+        float(entry["output"]),
+        optional("cache_read"),
+        optional("cache_write"),
+    )

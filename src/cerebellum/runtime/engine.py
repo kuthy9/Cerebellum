@@ -70,10 +70,11 @@ def refuse_eval_run(run: RunRecord) -> None:
         )
 
 
-def load_run_workflow(store: Store, run: RunRecord) -> Workflow:
-    """Re-parse the workflow snapshot pinned to the run (connector env vars resolve now)."""
+def load_run_workflow(store: Store, run: RunRecord, *, require_env: bool = True) -> Workflow:
+    """Re-parse the workflow snapshot pinned to the run (connector env vars resolve now). Pass
+    `require_env=False` only to display the run: unset connector variables stay unresolved."""
     source, base_dir = store.get_workflow_source(run.workflow_digest)
-    return parse_workflow(source, base_dir=base_dir)
+    return parse_workflow(source, base_dir=base_dir, require_env=require_env)
 
 
 class Engine:
