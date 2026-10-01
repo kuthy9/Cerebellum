@@ -64,7 +64,10 @@ class EvalRunner:
     ) -> EvalRunRecord:
         suite = loaded.suite
         # An earlier eval of this suite whose process died never finished its row: record it.
-        self.store.abandon_stale_eval_runs(suite.suite, timeout=self.settings.lease_seconds)
+        for abandoned in self.store.abandon_stale_eval_runs(
+            suite.suite, timeout=self.settings.lease_seconds
+        ):
+            self._close_approvals(abandoned)
         baseline = self.store.latest_eval_run(suite.suite, mock=self.provider.mock)
         previous = (
             {result.case_id: result.passed for result in self.store.get_eval_results(baseline.id)}
@@ -105,6 +108,7 @@ class EvalRunner:
                 if on_result is not None:
                     on_result(case, result)
         except BaseException as exc:  # interrupted or broken: never leave the eval "running"
+            self._close_approvals(eval_run_id)
             self.store.finish_eval_run(
                 eval_run_id,
                 status="errored",
@@ -213,6 +217,20 @@ class EvalRunner:
                 comment=comment,
             )
         return record
+
+    def _close_approvals(self, eval_run_id: str) -> None:
+        """An eval interrupted before deciding a case leaves its approval pending, and nobody
+        else may decide it (eval runs are records): reject it as `eval`, without resuming the
+        run, so it leaves the people's Approvals list."""
+        for approval in self.store.list_approvals(status="pending", eval_run_id=eval_run_id):
+            with contextlib.suppress(Exception):  # decided meanwhile: nothing left to close
+                self.store.decide_approval(
+                    approval.id,
+                    approved=False,
+                    by=EVAL_ACTOR,
+                    comment=f"eval {eval_run_id} was interrupted before deciding this case; "
+                    "closed without resuming the run",
+                )
 
     def _close_tasks(self, run_id: str, case_id: str) -> None:
         """Eval traffic must not land in the people's inbox: close the tasks a case opened."""

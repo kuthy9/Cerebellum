@@ -866,7 +866,11 @@ class Store:
         return _approval(rows[0]) if rows else None
 
     def list_approvals(
-        self, *, status: str | None = None, run_id: str | None = None
+        self,
+        *,
+        status: str | None = None,
+        run_id: str | None = None,
+        eval_run_id: str | None = None,
     ) -> list[ApprovalRecord]:
         clauses: list[str] = []
         params: list[Any] = []
@@ -876,6 +880,9 @@ class Store:
         if run_id is not None:
             clauses.append("run_id=?")
             params.append(run_id)
+        if eval_run_id is not None:
+            clauses.append("run_id IN (SELECT run_id FROM runs WHERE eval_run_id=?)")
+            params.append(eval_run_id)
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         rows = self._rows(
             f"SELECT * FROM approvals {where} ORDER BY requested_at, id", tuple(params)

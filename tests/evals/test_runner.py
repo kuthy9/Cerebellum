@@ -253,6 +253,78 @@ async def test_next_eval_of_the_suite_marks_a_killed_eval_abandoned(
     assert record.status == "completed" and record.baseline_id is None
 
 
+LARGE_REFUND = {"order_id": "A1002", "amount": 899}  # waits for a manager's approval
+
+
+async def test_interrupted_eval_closes_the_approval_it_left_pending(
+    make_runner, store, monkeypatch, tmp_path
+):
+    """Review finding: an eval interrupted between a case's start and its approval decision
+    left a pending approval nobody may decide, listed in the dashboard's Approvals forever."""
+    path = tmp_path / "evals.yaml"
+    path.write_text(
+        f"""
+suite: needs_approval
+workflow: {WORKFLOW}
+cases:
+  - id: large
+    input: {{order_id: A1002, amount: 899}}
+    expect: {{status: succeeded}}
+""",
+        encoding="utf-8",
+    )
+
+    class Boom(Exception):
+        pass
+
+    async def interrupted_decide(*args, **kwargs):
+        raise Boom("operator pressed Ctrl-C")
+
+    monkeypatch.setattr(Engine, "decide", interrupted_decide)
+    with pytest.raises(Boom):
+        await make_runner().run(load_suite(path, env={}))
+    [record] = store.list_eval_runs()
+    assert record.status == "errored"
+    assert store.list_approvals(status="pending") == []
+    [approval] = store.list_approvals()
+    assert (approval.status, approval.decided_by) == ("rejected", "eval")
+    assert "interrupted" in approval.comment
+    run = store.get_run(approval.run_id)
+    assert run.eval_run_id == record.id
+    assert run.status is RunStatus.WAITING_APPROVAL  # not resumed: eval runs are records
+
+
+async def test_abandoning_a_killed_eval_closes_its_pending_approval(
+    make_runner, store, settings, payments, clock, tmp_path
+):
+    loaded = small_suite(tmp_path)
+    store.create_eval_run(
+        "ev_0000dead",
+        suite=loaded.suite.suite,
+        suite_path=str(loaded.path),
+        workflow_name=loaded.workflow.name,
+        workflow_digest=loaded.workflow.digest,
+        mock=True,
+        total=1,
+        baseline_id=None,
+    )
+    killed = Engine(  # the killed eval's engine, stopped while its case waited
+        store,
+        settings,
+        MockProvider(latency=(0, 0)),
+        http_transports={"payments": httpx.ASGITransport(app=create_payments_app(payments))},
+        eval_runs=True,
+    )
+    waiting = await killed.start(loaded.workflow, LARGE_REFUND, eval_run_id="ev_0000dead")
+    assert waiting.status is RunStatus.WAITING_APPROVAL
+    clock.advance(settings.lease_seconds + 1)
+    await make_runner().run(loaded)
+    assert store.get_eval_run("ev_0000dead").status == "errored"
+    [approval] = store.list_approvals(run_id=waiting.run_id)
+    assert approval.status == "rejected" and "interrupted" in approval.comment
+    assert store.get_run(waiting.run_id).status is RunStatus.WAITING_APPROVAL
+
+
 async def test_eval_runs_are_records_that_cannot_be_resumed_or_decided(
     make_runner, store, settings, payments, clock
 ):
