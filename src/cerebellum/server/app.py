@@ -367,19 +367,24 @@ def create_app(
     if (static_dir / "assets").is_dir():
         app.mount("/assets", StaticFiles(directory=static_dir / "assets"), name="assets")
 
-    @app.get("/{path:path}", include_in_schema=False)
-    async def ui(path: str):
+    # HEAD too: FastAPI routes, unlike plain Starlette ones, do not add it to GET.
+    @app.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
+    async def ui(path: str, request: Request):
         if path == "api" or path.startswith("api/"):
+            if request.method == "HEAD":  # the JSON API answers GET only, as before
+                raise HTTPException(405, headers={"Allow": "GET"})
             raise HTTPException(404, "not found")
         root = static_dir.resolve()
         index = root / "index.html"
         try:
             candidate = (root / path).resolve()
             found = bool(path) and candidate.is_file() and root in candidate.parents
+            # index.html under any spelling (INDEX.HTML on a case-insensitive disk) is the index
+            found = found and not (index.is_file() and candidate.samefile(index))
         except (ValueError, OSError):
             # a name no file can have, e.g. one with a NUL byte or a segment that is too long
             found = False
-        if found and candidate != index:
+        if found:
             return FileResponse(candidate)
         if index.is_file():
             return FileResponse(index, headers=INDEX_HEADERS)

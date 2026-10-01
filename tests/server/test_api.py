@@ -304,6 +304,33 @@ def test_the_index_is_revalidated_so_a_rebuilt_ui_is_picked_up(store, settings, 
             assert c.get(path).headers.get("cache-control") == "no-cache", path
 
 
+def test_every_path_to_the_index_is_revalidated(store, settings, tmp_path):
+    """Review finding: on a case-insensitive file system /INDEX.HTML is index.html, but it was
+    served as an ordinary static file, without Cache-Control: no-cache."""
+    with TestClient(app_with(store, settings, tmp_path, make_static(tmp_path))) as c:
+        for path in ("/INDEX.HTML", "/Index.html", "/./index.html"):
+            page = c.get(path)
+            assert "<title>ui</title>" in page.text, path
+            assert page.headers.get("cache-control") == "no-cache", path
+
+
+def test_head_requests_to_the_ui_are_answered(store, settings, tmp_path):
+    """Review finding: HEAD / answered 405 because the UI route only accepted GET."""
+    with TestClient(app_with(store, settings, tmp_path, make_static(tmp_path))) as c:
+        for path in ("/", "/index.html", "/runs/r_12345678"):
+            page = c.head(path)
+            assert page.status_code == 200, (path, page.status_code)
+            assert page.headers.get("cache-control") == "no-cache", path
+            assert page.headers["content-type"].startswith("text/html"), path
+        favicon = c.head("/favicon.svg")
+        assert favicon.status_code == 200 and "cache-control" not in favicon.headers
+        assert c.head("/assets/app.js").status_code == 200
+        for path in ("/api/info", "/api/nope"):  # HEAD is for the UI; the JSON API stays GET-only
+            assert c.head(path).status_code == 405, path
+    with TestClient(app_with(store, settings, tmp_path, tmp_path / "not-built")) as c:
+        assert c.head("/").status_code == 200
+
+
 def test_paths_the_filesystem_rejects_fall_back_to_the_ui(store, settings, tmp_path):
     app = app_with(store, settings, tmp_path, make_static(tmp_path))
     with TestClient(app, raise_server_exceptions=False) as c:
