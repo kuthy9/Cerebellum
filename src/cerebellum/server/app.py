@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
+import socket
 from collections.abc import AsyncIterator, Callable, Collection, Mapping
 from pathlib import Path
 from typing import Any
@@ -41,7 +43,8 @@ from cerebellum.server.worker import Worker
 from cerebellum.spec.durations import parse_duration
 
 STATIC_DIR = Path(__file__).parent / "static"
-# Names of this machine; a dashboard bound to one of them only answers requests addressed to them.
+# Names of this machine; a dashboard bound to loopback only answers requests addressed to them
+# (and to the host it was bound to): see loopback_host_names.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
 # index.html names the hashed /assets files of the current build, so browsers must revalidate it
 # (or a rebuilt UI would load the old assets); the hashed assets themselves may stay cached.
@@ -58,22 +61,61 @@ The JSON API is available under <code>/api</code>.</p>
 """
 
 
+def normalise_host(name: str) -> str:
+    """One spelling per host name: without surrounding spaces or [] (IPv6), lower-case, and
+    without the trailing dot of a fully qualified name (`LocalHost.` → `localhost`)."""
+    value = name.strip().lower()
+    if value.startswith("[") and value.endswith("]"):
+        value = value[1:-1]
+    return value.removesuffix(".")
+
+
 def host_name(header: str) -> str:
-    """The host part of a Host header: `[::1]:7400` → `::1`, `localhost:7400` → `localhost`."""
-    value = header.strip().lower()
+    """The host part of a Host header: `[::1]:7400` → `::1`, `LocalHost.:7400` → `localhost`."""
+    value = header.strip()
     if value.startswith("["):
-        return value[1:].split("]", 1)[0]
+        return normalise_host(value[1:].split("]", 1)[0])
     name, sep, port = value.rpartition(":")
-    return name if sep and port.isdigit() and ":" not in name else value
+    return normalise_host(name if sep and port.isdigit() and ":" not in name else value)
+
+
+def _is_loopback_address(address: str) -> bool:
+    try:
+        ip = ipaddress.ip_address(address.split("%", 1)[0])  # without an IPv6 zone (%lo0)
+    except ValueError:
+        return False
+    mapped = getattr(ip, "ipv4_mapped", None)  # ::ffff:127.0.0.1
+    return ip.is_loopback or (mapped is not None and mapped.is_loopback)
+
+
+def loopback_host_names(bind_host: str) -> frozenset[str] | None:
+    """The Host header names a dashboard bound to `bind_host` answers, or None when `bind_host`
+    is not on this machine only. Loopback whatever its spelling: LOCALHOST, localhost., 127.1,
+    127.0.0.2 or ::1, or any name all of whose addresses (as the server resolves them to bind)
+    are loopback ones. The names: the usual ones, `bind_host` itself and its addresses."""
+    name = normalise_host(bind_host)
+    if name in LOOPBACK_HOSTS:
+        return LOOPBACK_HOSTS
+    try:  # as uvicorn (asyncio's create_server) resolves the host it binds
+        found = socket.getaddrinfo(
+            bind_host.strip(), None, type=socket.SOCK_STREAM, flags=socket.AI_PASSIVE
+        )
+    except (OSError, UnicodeError):  # unresolvable: the server cannot bind it either
+        return None
+    addresses = {str(info[4][0]) for info in found}
+    if not addresses or not all(_is_loopback_address(a) for a in addresses):
+        return None
+    return LOOPBACK_HOSTS | {name} | {normalise_host(a.split("%", 1)[0]) for a in addresses}
 
 
 class HostGuard:
     """Refuse requests addressed to any other host name. A web page whose domain is re-pointed at
-    127.0.0.1 (DNS rebinding) is same-origin with the dashboard, but its Host header is not."""
+    127.0.0.1 (DNS rebinding) is same-origin with the dashboard, but its Host header is not. Names
+    compare in any case and with or without a trailing dot."""
 
     def __init__(self, app: ASGIApp, allowed: Collection[str]):
         self.app = app
-        self.allowed = frozenset(allowed)
+        self.allowed = frozenset(normalise_host(name) for name in allowed)
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] in ("http", "websocket"):

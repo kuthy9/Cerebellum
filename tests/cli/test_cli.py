@@ -598,6 +598,60 @@ def test_ui_beyond_this_machine_accepts_any_host_name(runner, monkeypatch):
     assert client.get("/api/info").status_code == 200
 
 
+LOOPBACK_SPELLINGS = (
+    "LOCALHOST",
+    "Localhost",
+    "localhost.",
+    " localhost ",
+    "127.1",
+    "127.0.0.2",
+    "0:0:0:0:0:0:0:1",
+)
+
+
+@pytest.mark.parametrize("spelling", LOOPBACK_SPELLINGS)
+@pytest.mark.parametrize("source", ["flag", "env"])
+def test_ui_on_any_spelling_of_loopback_keeps_the_host_check(runner, monkeypatch, spelling, source):
+    """Review finding: only the exact strings 127.0.0.1, localhost and ::1 counted as loopback,
+    so LOCALHOST, localhost., 127.1 or 127.0.0.2 (all bound to this machine only) turned the
+    DNS-rebinding check off and printed the warning meant for binds reachable from elsewhere."""
+    calls = fake_server(monkeypatch)
+    args = ["ui", "--port", "7555", "--no-sandbox", "--mock"]
+    if source == "env":
+        monkeypatch.setenv("CEREBELLUM_UI_HOST", spelling)
+    else:
+        args += ["--host", spelling]
+    result = invoke(runner, *args)
+    assert result.exit_code == 0, result.text
+    assert "no authentication" not in result.text
+    client = TestClient(calls["app"], base_url="http://127.0.0.1:7555")
+    name = spelling.strip()
+    own = f"[{name}]:7555" if ":" in name else f"{name}:7555"
+    assert client.get("/api/info", headers={"host": own}).status_code == 200, own
+    assert client.get("/api/info").status_code == 200
+    for evil in ("evil.example:7555", "EVIL.example.:7555", "evil.example"):
+        assert client.get("/api/info", headers={"host": evil}).status_code == 400, evil
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "::", "10.1.2.3"])
+def test_ui_warns_and_accepts_any_host_name_beyond_this_machine(runner, monkeypatch, host):
+    calls = fake_server(monkeypatch)
+    result = invoke(runner, "ui", "--host", host, "--no-sandbox", "--mock")
+    assert result.exit_code == 0, result.text
+    assert "no authentication" in result.text
+    client = TestClient(calls["app"], base_url="http://192.168.1.5:7400")
+    assert client.get("/api/info", headers={"host": "evil.example:7400"}).status_code == 200
+
+
+def test_the_host_check_ignores_case_and_a_trailing_dot(runner, monkeypatch):
+    """A Host header names the same host in any case and with or without its trailing dot."""
+    calls = fake_server(monkeypatch)
+    assert invoke(runner, "ui", "--port", "7555", "--no-sandbox", "--mock").exit_code == 0
+    client = TestClient(calls["app"], base_url="http://127.0.0.1:7555")
+    for host in ("LOCALHOST:7555", "LocalHost.:7555", "localhost.", "127.0.0.1.:7555"):
+        assert client.get("/api/info", headers={"host": host}).status_code == 200, host
+
+
 def test_trace_does_not_draw_spans_closed_by_a_reset_or_cancel_as_running():
     for status in ("interrupted", "cancelled"):
         assert render.SPAN_STYLES.get(status, render.ACCENT) != render.ACCENT

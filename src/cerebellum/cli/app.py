@@ -53,7 +53,7 @@ from cerebellum.runtime.trace import build_spans
 from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments_app
 from cerebellum.sandbox.server import SandboxHandle, sandbox_url, start_sandbox
 from cerebellum.server import create_app
-from cerebellum.server.app import LOOPBACK_HOSTS, dashboard_server
+from cerebellum.server.app import dashboard_server, loopback_host_names
 from cerebellum.spec import load_workflow
 from cerebellum.spec.models import Workflow
 from cerebellum.templates import template_path
@@ -896,7 +896,10 @@ def ui(
     settings = _settings()
     bind_host = host or settings.ui_host
     bind_port = port or settings.ui_port
-    if bind_host not in LOOPBACK_HOSTS:
+    # Bound to this machine only (under any spelling of loopback): answer only requests
+    # addressed to it, against DNS rebinding. Otherwise anyone who can reach it may use it.
+    allowed_hosts = loopback_host_names(bind_host)
+    if allowed_hosts is None:
         err_console.print(
             Text("! ", style="yellow")
             + Text(
@@ -916,8 +919,7 @@ def ui(
             mode=choice.reason,
             mock_requested=choice.mock_requested,
             workflows_dir=workflows,
-            # Bound to this machine: answer only requests addressed to it (DNS rebinding).
-            allowed_hosts=LOOPBACK_HOSTS if bind_host in LOOPBACK_HOSTS else None,
+            allowed_hosts=allowed_hosts,
         )
         console.print(render.header("dashboard", f"{url} · {choice.reason}"))
         console.print(Text("  Ctrl-C to stop", style=render.MUTED))
