@@ -1,4 +1,6 @@
+import asyncio
 import os
+import threading
 from datetime import date, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -101,6 +103,53 @@ async def test_sandbox_bad_seed_removes_partial_file(tmp_path):
         await connector.open()
     assert info.value.retryable is False
     assert not db.exists()
+
+
+async def abandoned_operation(connector):
+    """Start a sandbox operation and cancel its caller mid-way, as a step timeout does: the
+    operation's thread keeps running until `release` is set."""
+    started, release, order = threading.Event(), threading.Event(), []
+
+    def slow(conn):
+        order.append("slow started")
+        started.set()
+        release.wait(5)
+        order.append("slow finished")
+
+    caller = asyncio.create_task(connector._run(slow))
+    await asyncio.to_thread(started.wait, 5)
+    caller.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await caller
+    return release, order
+
+
+async def test_sandbox_operation_waits_for_an_abandoned_one(tmp_path, seed_file):
+    connector = SqliteSandboxConnector("db", tmp_path / "s.db", seed_file)
+    release, order = await abandoned_operation(connector)
+
+    def count(conn):
+        order.append("next")
+        return conn.execute("SELECT COUNT(*) AS n FROM orders").fetchone()["n"]
+
+    following = asyncio.create_task(connector._run(count))
+    await asyncio.sleep(0.1)
+    assert order == ["slow started"]  # the shared connection is still in use
+    release.set()
+    assert await following == 2
+    assert order == ["slow started", "slow finished", "next"]
+    await connector.close()
+
+
+async def test_sandbox_close_waits_for_an_abandoned_operation(tmp_path, seed_file):
+    connector = SqliteSandboxConnector("db", tmp_path / "s.db", seed_file)
+    release, order = await abandoned_operation(connector)
+    closing = asyncio.create_task(connector.close())
+    await asyncio.sleep(0.1)
+    assert not closing.done()
+    release.set()
+    await closing
+    assert order == ["slow started", "slow finished"]
 
 
 def test_factory_picks_sandbox_or_postgres(tmp_path):
