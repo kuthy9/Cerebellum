@@ -168,6 +168,25 @@ def test_a_second_eval_in_the_same_home_is_refused(runner, tmp_path, free_port):
     assert invoke(runner, "eval", write_suite(tmp_path)).exit_code == 0
 
 
+def test_evals_prune_removes_old_sandbox_directories_and_says_which(runner, tmp_path):
+    suite = write_suite(tmp_path)
+    first = EVAL_ID.findall(invoke(runner, "eval", suite).text)[-1]
+    second = EVAL_ID.findall(invoke(runner, "eval", suite).text)[-1]  # after "vs <baseline>"
+    assert first != second
+    evals_dir = tmp_path / "home" / "evals"
+    assert (evals_dir / first).is_dir() and (evals_dir / second).is_dir()
+
+    result = invoke(runner, "evals", "prune", "--keep", "1")
+    assert result.exit_code == 0, result.text
+    assert f"{evals_dir / first}" in result.text and "smoke" in result.text
+    assert "removed 1 sandbox directory" in result.text and "newest 1 per suite" in result.text
+    assert not (evals_dir / first).exists() and (evals_dir / second).is_dir()
+    assert f"vs {second}" in invoke(runner, "eval", suite).text  # the history is kept
+
+    again = invoke(runner, "evals", "prune", "--keep", "2")
+    assert again.exit_code == 0 and "nothing to prune" in again.text, again.text
+
+
 def test_runs_leaves_eval_runs_out_unless_asked(runner, tmp_path):
     """Review finding: after `make eval`, `cerebellum runs` showed failed and rejected refunds."""
     assert invoke(runner, "eval", write_suite(tmp_path)).exit_code == 0

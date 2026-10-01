@@ -15,6 +15,7 @@ from rich.tree import Tree
 
 from cerebellum.connectors import HealthStatus
 from cerebellum.errors import SpecIssue
+from cerebellum.evals.prune import PrunedHome
 from cerebellum.evals.targets import Target
 from cerebellum.runtime.store import (
     ApprovalRecord,
@@ -402,6 +403,27 @@ def eval_case_line(result: EvalResultRecord) -> Group:
     for check in result.checks:
         if not check["passed"]:
             lines.append(Text(f"     {describe_check(check)}", style="red"))
+    return Group(*lines)
+
+
+def pruned_view(pruned: Sequence[PrunedHome], keep: int) -> Group:
+    """What `cerebellum evals prune` removed."""
+    if not pruned:
+        return Group(
+            Text(
+                f"nothing to prune: no suite has sandbox directories beyond its newest {keep}",
+                style=MUTED,
+            )
+        )
+    lines = [
+        Text(f"  - {item.path}  ", style="red") + Text(item.suite, style=MUTED) for item in pruned
+    ]
+    noun = "directory" if len(pruned) == 1 else "directories"
+    lines.append(
+        Text("● ", style="green")
+        + Text(f"removed {len(pruned)} sandbox {noun}; kept the newest {keep} per suite")
+    )
+    lines.append(Text("  eval results stay in the history: cerebellum ui → /evals", style=MUTED))
     return Group(*lines)
 
 

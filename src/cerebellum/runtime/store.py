@@ -1174,6 +1174,17 @@ class Store:
         )
         return [_eval_run(row) for row in rows]
 
+    def eval_runs_beyond(self, keep: int) -> list[EvalRunRecord]:
+        """Every eval run except the newest `keep` of each suite: by suite, newest first."""
+        rows = self._rows(
+            "SELECT * FROM eval_runs WHERE id IN ("
+            "SELECT id FROM (SELECT id, ROW_NUMBER() OVER ("
+            "PARTITION BY suite ORDER BY created_at DESC, rowid DESC) AS n FROM eval_runs) "
+            "WHERE n > ?) ORDER BY suite, created_at DESC, rowid DESC",
+            (keep,),
+        )
+        return [_eval_run(row) for row in rows]
+
     def latest_eval_run(self, suite: str, *, mock: bool) -> EvalRunRecord | None:
         """The most recent completed run of `suite` with the same AI mode (mock or Claude): the
         baseline the next run is compared with. Mock and Claude results are not comparable."""

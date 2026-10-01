@@ -30,6 +30,8 @@ DEFAULT_UI_SHUTDOWN_GRACE_SECONDS = 2.0
 DEFAULT_EVAL_MIN_PASS = 0.9
 # The file in CEREBELLUM_HOME that `cerebellum eval` holds a lock on: one eval at a time per home.
 EVAL_LOCK_FILE = "eval.lock"
+# `cerebellum evals prune`: how many of each suite's newest eval runs keep their sandbox directory.
+DEFAULT_EVAL_KEEP = 10
 # `cerebellum new`: model attempts per draft — the first reply plus repairs from loader issues.
 DEFAULT_NEW_ATTEMPTS = 3
 

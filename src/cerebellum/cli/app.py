@@ -30,12 +30,18 @@ from cerebellum.ai.pricing import Pricing
 from cerebellum.authoring import DRAFT_HEADER, DraftError, draft_workflow
 from cerebellum.cli import render
 from cerebellum.cli.demo import run_scenarios
-from cerebellum.config import DEFAULT_EVAL_MIN_PASS, Settings, has_anthropic_credentials
+from cerebellum.config import (
+    DEFAULT_EVAL_KEEP,
+    DEFAULT_EVAL_MIN_PASS,
+    Settings,
+    has_anthropic_credentials,
+)
 from cerebellum.connectors import ConnectorEnv, HealthStatus, create_connector
 from cerebellum.connectors.postgres import sandbox_db_path
 from cerebellum.errors import CerebellumError, LeaseUnavailable, SpecError, StepError
 from cerebellum.evals import EvalRunner, LoadedSuite, load_suite
 from cerebellum.evals.lock import EvalBusy, EvalLock
+from cerebellum.evals.prune import prune_eval_homes
 from cerebellum.evals.targets import connector_targets
 from cerebellum.runtime.engine import Engine, load_run_workflow
 from cerebellum.runtime.states import RunStatus
@@ -57,8 +63,10 @@ app = typer.Typer(
 )
 tasks_app = typer.Typer(help="Manual task inbox (fallback hand-offs).")
 connectors_app = typer.Typer(help="Connector utilities.", no_args_is_help=True)
+evals_app = typer.Typer(help="Eval run housekeeping.", no_args_is_help=True)
 app.add_typer(tasks_app, name="tasks")
 app.add_typer(connectors_app, name="connectors")
+app.add_typer(evals_app, name="evals")
 
 console = Console(highlight=False)
 err_console = Console(stderr=True, highlight=False)
@@ -839,6 +847,20 @@ def eval_suite(
             console.print(render.eval_summary(record, baseline, regressed, min_pass))
     passed = record.passed / record.total + 1e-9 >= min_pass
     raise typer.Exit(EXIT_OK if passed else EXIT_FAILED)
+
+
+@evals_app.command("prune")
+def evals_prune(
+    keep: Annotated[
+        int,
+        typer.Option("--keep", min=0, help="Newest eval runs per suite that keep their sandbox."),
+    ] = DEFAULT_EVAL_KEEP,
+) -> None:
+    """Remove the sandbox directories of all but the newest eval runs of each suite."""
+    settings = _settings()
+    with Store(settings.db_path) as store:
+        pruned = prune_eval_homes(store, settings, keep=keep)
+    console.print(render.pruned_view(pruned, keep))
 
 
 @app.command()
