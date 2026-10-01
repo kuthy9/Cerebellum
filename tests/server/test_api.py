@@ -201,6 +201,12 @@ def test_serves_the_ui_with_an_spa_fallback(store, settings, tmp_path):
         assert c.get("/api/nope").status_code == 404
 
 
+def test_the_index_is_revalidated_so_a_rebuilt_ui_is_picked_up(store, settings, tmp_path):
+    with TestClient(app_with(store, settings, tmp_path, make_static(tmp_path))) as c:
+        for path in ("/", "/index.html", "/runs/r_12345678"):
+            assert c.get(path).headers.get("cache-control") == "no-cache", path
+
+
 def test_paths_the_filesystem_rejects_fall_back_to_the_ui(store, settings, tmp_path):
     app = app_with(store, settings, tmp_path, make_static(tmp_path))
     with TestClient(app, raise_server_exceptions=False) as c:

@@ -38,6 +38,9 @@ from cerebellum.spec.durations import parse_duration
 STATIC_DIR = Path(__file__).parent / "static"
 # Names of this machine; a dashboard bound to one of them only answers requests addressed to them.
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "localhost", "::1"})
+# index.html names the hashed /assets files of the current build, so browsers must revalidate it
+# (or a rebuilt UI would load the old assets); the hashed assets themselves may stay cached.
+INDEX_HEADERS = {"Cache-Control": "no-cache"}
 # How many runs of a suite the eval detail returns for its trend line.
 EVAL_HISTORY = 30
 UI_MISSING = """<!doctype html>
@@ -350,15 +353,16 @@ def create_app(
         if path == "api" or path.startswith("api/"):
             raise HTTPException(404, "not found")
         root = static_dir.resolve()
+        index = root / "index.html"
         try:
             candidate = (root / path).resolve()
         except ValueError:
             candidate = None  # a name no file can have, e.g. one with a NUL byte
-        if path and candidate and candidate.is_file() and root in candidate.parents:
+        found = path and candidate and candidate.is_file() and root in candidate.parents
+        if found and candidate != index:
             return FileResponse(candidate)
-        index = root / "index.html"
         if index.is_file():
-            return FileResponse(index)
+            return FileResponse(index, headers=INDEX_HEADERS)
         return HTMLResponse(UI_MISSING)
 
     return app
