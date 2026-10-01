@@ -230,6 +230,23 @@ def test_hints_leave_out_the_sandbox_for_a_payments_url_default_elsewhere(
         assert "--sandbox" not in text
 
 
+@pytest.mark.parametrize("default", ["http://127.0.0.1:8787", "http://127.0.0.1:9", None])
+def test_hints_keep_the_sandbox_for_a_run_started_on_it(runner, tmp_path, monkeypatch, default):
+    """Review finding: deciding the hint from this environment dropped --sandbox for a run
+    started with it whenever PAYMENTS_URL resolves elsewhere without it (a non-default sandbox
+    port, a default pointing at another API, no default): following `status` then sent the
+    refund outside the sandbox. The hint follows the URL the run itself used."""
+    monkeypatch.delenv("PAYMENTS_URL")
+    flow = tmp_path / "pay.yaml"
+    url = "${PAYMENTS_URL}" if default is None else "${PAYMENTS_URL:-" + default + "}"
+    flow.write_text(ENV_FLOW.replace("${CEREBELLUM_TEST_API_URL}", url), encoding="utf-8")
+    started = invoke(runner, "run", str(flow), "--sandbox")
+    assert started.exit_code == 3, started.text
+    run_id = run_id_of(started)
+    for text in (started.text, invoke(runner, "status", run_id).text):
+        assert f"cerebellum approve {run_id} gate --by <you> --sandbox" in text, text
+
+
 def test_reject_marks_the_run_rejected(runner):
     started = invoke(runner, "run", WORKFLOW, "-i", f"@{INPUTS / 'large.json'}", "--sandbox")
     run_id = run_id_of(started)
@@ -770,7 +787,7 @@ def test_a_bind_host_that_is_not_a_host_name_is_refused(
     assert calls == {} and sandbox_calls == {}
 
 
-@pytest.mark.parametrize("host", ["a..b", "::1"])
+@pytest.mark.parametrize("host", ["a..b", "::1", "localhost:8787"])
 def test_a_sandbox_host_that_cannot_be_used_is_a_clear_error(runner, monkeypatch, host):
     """Review finding: a CEREBELLUM_SANDBOX_HOST the sandbox's port check could not use (a
     name that does not resolve, an IPv6 address) ended `run --sandbox` in a traceback."""

@@ -6,7 +6,7 @@ from fastapi.testclient import TestClient
 
 from cerebellum.errors import CerebellumError
 from cerebellum.sandbox.payments import FailMode, PaymentsState, create_payments_app
-from cerebellum.sandbox.server import sandbox_running, start_sandbox
+from cerebellum.sandbox.server import sandbox_running, sandbox_url, start_sandbox
 
 REFUND = {"order_id": "A1001", "amount": 120.0}
 
@@ -110,3 +110,16 @@ def test_start_sandbox_refuses_a_port_used_by_something_else(free_port):
         blocker.listen()
         with pytest.raises(CerebellumError, match="in use by another service"):
             start_sandbox("127.0.0.1", free_port)
+
+
+@pytest.mark.parametrize(
+    ("host", "url"),
+    [
+        ("127.0.0.1", "http://127.0.0.1:8787"),
+        ("localhost", "http://localhost:8787"),
+        ("::1", "http://[::1]:8787"),
+        ("[::1]", "http://[::1]:8787"),  # review finding: it became http://[[::1]]:8787
+    ],
+)
+def test_sandbox_url_brackets_an_ipv6_address_once(host, url):
+    assert sandbox_url(host, 8787) == url

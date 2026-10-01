@@ -8,7 +8,7 @@ import json
 import secrets
 import sqlite3
 import threading
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Iterator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -580,7 +580,10 @@ class Store:
         *,
         mock: bool,
         eval_run_id: str | None = None,
+        rest_urls: Mapping[str, str] | None = None,
     ) -> RunRecord:
+        """`rest_urls`: where the run's REST connectors pointed when it started (credentials
+        removed), recorded in run.started because the environment may differ when it resumes."""
         with self._tx() as tx:
             tx.execute(
                 "INSERT INTO runs(run_id, workflow_digest, workflow_name, status, input, params, "
@@ -614,6 +617,7 @@ class Store:
                     "params": params,
                     "mock": mock,
                     "eval_run_id": eval_run_id,
+                    "rest_urls": dict(rest_urls or {}),
                 },
             )
         return self.get_run(run_id)

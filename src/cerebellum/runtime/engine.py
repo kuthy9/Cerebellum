@@ -11,6 +11,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import httpx
 
@@ -58,6 +59,17 @@ def _default_owner() -> str:
 
 def _span(step_id: str, attempt: int) -> str:
     return f"{step_id}#{attempt}"
+
+
+def rest_urls(workflow: Workflow) -> dict[str, str]:
+    """Where `workflow`'s REST connectors point, without user, password, query or fragment."""
+    urls: dict[str, str] = {}
+    for name, spec in workflow.connectors.items():
+        if spec.type == "rest":
+            parts = urlsplit(spec.base_url)
+            netloc = parts.netloc.rpartition("@")[2]
+            urls[name] = urlunsplit((parts.scheme, netloc, parts.path, "", ""))
+    return urls
 
 
 def refuse_eval_run(run: RunRecord) -> None:
@@ -123,6 +135,7 @@ class Engine:
             resolved,
             mock=self.ai.mock,
             eval_run_id=eval_run_id,
+            rest_urls=rest_urls(workflow),
         )
 
     async def start(

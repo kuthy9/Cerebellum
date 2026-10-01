@@ -90,6 +90,19 @@ async def test_retry_then_success(store, settings, clock, tmp_path):
     assert event_types(store, run.run_id)[-1] == "run.completed"
 
 
+def test_a_run_records_where_its_rest_connectors_point_without_credentials(
+    store, settings, tmp_path
+):
+    """The URLs a run's REST connectors resolved to when it started (later hints use them:
+    the environment may differ by then), with user, password, query and fragment removed."""
+    text = API_YAML.replace(
+        'base_url: "http://api.test"', 'base_url: "https://user:pw@api.test:8443/v1?token=x#f"'
+    )
+    run = engine_for(store, settings).prepare(wf(text, tmp_path), {"order_id": "A1"})
+    [started] = [e for e in store.get_events(run.run_id) if e.type == "run.started"]
+    assert started.data["rest_urls"] == {"api": "https://api.test:8443/v1"}
+
+
 async def test_non_retryable_failure_cancels_downstream(store, settings, clock, tmp_path):
     handler = Responses((404, {"detail": "nope"}))
     engine = engine_for(store, settings, {"api": httpx.MockTransport(handler)})

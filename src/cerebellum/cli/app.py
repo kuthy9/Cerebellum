@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Annotated, Any, NoReturn
 
 import click
+import httpx
 import typer
 import uvicorn
 from dotenv import load_dotenv
@@ -48,8 +49,8 @@ from cerebellum.errors import CerebellumError, ConfigError, LeaseUnavailable, Sp
 from cerebellum.evals import EvalRunner, LoadedSuite, load_suite
 from cerebellum.evals.lock import EvalBusy, EvalLock
 from cerebellum.evals.prune import prune_eval_homes
-from cerebellum.evals.targets import connector_targets
-from cerebellum.runtime.engine import Engine, load_run_workflow
+from cerebellum.evals.targets import connector_targets, same_server
+from cerebellum.runtime.engine import Engine, load_run_workflow, rest_urls
 from cerebellum.runtime.states import RunStatus
 from cerebellum.runtime.store import EventRecord, RunRecord, Store
 from cerebellum.runtime.trace import build_spans
@@ -244,7 +245,7 @@ def _start_sandbox(settings: Settings, fail: str) -> SandboxHandle:
         _fail(str(exc), EXIT_INVALID)
     except CerebellumError as exc:
         _fail(str(exc))
-    except OSError as exc:  # its port check cannot use the host (unresolved, IPv6)
+    except (OSError, httpx.InvalidURL) as exc:  # a host its checks cannot use (unresolved, IPv6)
         _fail(
             f"cannot start the sandbox payments API on {host}:{settings.sandbox_port} "
             f"(CEREBELLUM_SANDBOX_HOST): {exc}"
@@ -423,19 +424,23 @@ def _show_run(
 
 def _sandbox_flag(store: Store, run: RunRecord, settings: Settings) -> str:
     """The flag hints add (`--sandbox` after a space, or nothing) to continue `run`: --sandbox
-    when the run's workflow has a REST connector whose base URL, in this environment, is this
-    home's sandbox URL (as `cerebellum eval` decides what its sandbox isolates). Continued
-    without it, such a run's payments calls find no API. The URL is not resolved as --sandbox
-    would set PAYMENTS_URL: that would also flag a connector whose default is a real API, and
-    following the hint would send its calls to the throwaway sandbox."""
+    when one of its REST connectors pointed at this home's sandbox payments API when the run
+    started. That is recorded in run.started, because this environment may resolve the URL
+    differently (PAYMENTS_URL is set by --sandbox only while that command runs). Continued
+    without the flag, such calls find no API or another one; with it, calls that went to
+    another API would go to the throwaway sandbox. Runs started before the URLs were recorded
+    are judged by their workflow in this environment."""
     url = sandbox_url(settings.sandbox_host, settings.sandbox_port)
-    try:
-        source, base_dir = store.get_workflow_source(run.workflow_digest)
-        workflow = parse_workflow(source, base_dir=base_dir, require_env=False)
-    except CerebellumError:  # a snapshot that no longer parses here: no hint about it
-        return ""
-    targets = connector_targets(workflow, url)
-    return " --sandbox" if any(t.kind == "rest" and t.isolated for t in targets) else ""
+    started = next((e for e in store.get_events(run.run_id) if e.type == "run.started"), None)
+    recorded = started.data.get("rest_urls") if started is not None else None
+    if recorded is None:
+        try:
+            source, base_dir = store.get_workflow_source(run.workflow_digest)
+            workflow = parse_workflow(source, base_dir=base_dir, require_env=False)
+        except CerebellumError:  # a snapshot that no longer parses here: no hint about it
+            return ""
+        recorded = rest_urls(workflow)
+    return " --sandbox" if any(same_server(used, url) for used in recorded.values()) else ""
 
 
 def _print_outcome(store: Store, run: RunRecord, settings: Settings) -> None:

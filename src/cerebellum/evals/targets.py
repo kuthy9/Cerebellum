@@ -30,7 +30,9 @@ def redact(url: str) -> str:
     return urlunsplit((parts.scheme, netloc, parts.path, "", ""))
 
 
-def _same_server(url: str, other: str) -> bool:
+def same_server(url: str, other: str) -> bool:
+    """Whether two base URLs name the same server (localhost is 127.0.0.1)."""
+
     def norm(value: str) -> str:
         return value.rstrip("/").replace("://localhost", "://127.0.0.1")
 
@@ -50,7 +52,7 @@ def connector_targets(workflow: Workflow, sandbox_url: str | None) -> list[Targe
                 targets.append(Target(name, "postgres", redact(spec.dsn), False, warning))
             continue
         url = redact(spec.base_url)
-        if sandbox_url is not None and _same_server(spec.base_url, sandbox_url):
+        if sandbox_url is not None and same_server(spec.base_url, sandbox_url):
             targets.append(Target(name, "rest", f"{url} (sandbox)", True, None))
             continue
         warning = f"{name} → {url} is not the sandbox payments API: eval cases call it for real"
