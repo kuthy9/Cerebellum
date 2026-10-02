@@ -285,6 +285,9 @@ trimmed, and an empty `CEREBELLUM_*` value means the default.
  ui/        React + Vite + Tailwind + React Flow source (built into server/static)
 ```
 
+The design notes (in Chinese) are in
+[`docs/superpowers/specs/2026-10-01-workflow-runtime-design.md`](docs/superpowers/specs/2026-10-01-workflow-runtime-design.md).
+
 ## Development
 
 ```bash

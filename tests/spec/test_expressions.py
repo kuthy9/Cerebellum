@@ -5,7 +5,6 @@ from cerebellum.spec.expressions import (
     check_expression,
     check_template,
     eval_condition,
-    eval_value,
     is_template,
     render,
 )
@@ -78,11 +77,6 @@ def test_condition_with_missing_values_is_false():
     assert eval_condition("steps.skipped.output is none", CTX) is True
 
 
-def test_eval_value_is_lenient():
-    assert eval_value("steps.fetch.output.id", CTX) == "A1001"
-    assert eval_value("steps.skipped.output.id", CTX) is None
-
-
 def test_check_expression_reports_syntax_errors():
     check_expression("input.amount > 5")
     with pytest.raises(TemplateError, match="invalid expression"):
@@ -96,4 +90,6 @@ def test_check_template_recurses():
 
 
 def test_sandbox_blocks_dunder_access():
-    assert eval_value("''.__class__.__mro__", {}) is None
+    assert render("{{ ''.__class__.__mro__ }}", {}, strict=False) is None
+    with pytest.raises(TemplateError, match="unsafe"):
+        render("{{ ''.__class__.__mro__ }}", {})

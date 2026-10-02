@@ -127,17 +127,6 @@ def eval_condition(expr: str, ctx: Mapping[str, Any]) -> bool:
     return bool(result)
 
 
-def eval_value(expr: str, ctx: Mapping[str, Any]) -> Any:
-    """Lenient value evaluation: missing values become None."""
-    try:
-        result = _LENIENT.compile_expression(expr, undefined_to_none=False)(**ctx)
-    except UndefinedError:
-        return None
-    except (TemplateSyntaxError, SecurityError) as exc:
-        raise TemplateError(f"cannot evaluate {expr!r}: {exc}") from exc
-    return None if isinstance(result, Undefined) else result
-
-
 def render(value: Any, ctx: Mapping[str, Any], *, strict: bool = True) -> Any:
     """Render templates inside `value` recursively. A string that is exactly one `{{ expr }}`
     keeps the native type of the expression result."""

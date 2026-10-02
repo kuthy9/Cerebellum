@@ -20,7 +20,7 @@ build/
 .eggs/
 
 # ── Cerebellum runtime state ──────────────────────────────────────────────────
-# SQLite checkpoint databases (contain run history + agent outputs)
+# SQLite databases (run history and sandbox databases)
 *.db
 *.db-shm
 *.db-wal
@@ -45,6 +45,11 @@ config.local.json
 .coverage
 coverage.xml
 htmlcov/
+
+# ── Local tool state ──────────────────────────────────────────────────────────
+.claude/
+.superpowers/
+.ruff_cache/
 
 # ── Editors ───────────────────────────────────────────────────────────────────
 .vscode/

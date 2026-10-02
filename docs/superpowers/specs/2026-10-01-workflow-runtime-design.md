@@ -1,7 +1,7 @@
 # Cerebellum 重构设计：可靠、可观察、可恢复的业务流程编排运行时
 
 - 日期：2026-10-01
-- 状态：待审阅
+- 状态：已实现（v0.2.0）
 - 定位：作品集 / 展示项目（demo 流畅、架构清晰、视觉精致、无外部依赖也能完整演示）
 
 ## 1. 目标与范围
@@ -287,4 +287,4 @@ Pydantic 结构校验；id 全局唯一（含 fallbacks）；`needs` / `fallback
 - **SQLite 并发写**：CLI 与 server 同时写入同一 DB；以 WAL + 短事务 + `busy_timeout` 缓解。
 - **至少一次语义**：非 http step（如 `query` 写语句）崩溃重放可能重复执行；示例中的 UPDATE 为幂等写法，文档注明。
 - **提交构建产物**：仓库体积略增，换取开箱即用。
-- **Claude API 形态变化**：provider 隔离在 `ai/anthropic.py`，桩测试覆盖解析逻辑。
+- **Claude API 形态变化**：provider 隔离在 `ai/anthropic_provider.py`，桩测试覆盖解析逻辑。
