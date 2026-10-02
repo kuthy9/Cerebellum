@@ -5,7 +5,7 @@
 **Describe the business process. Cerebellum makes it reliable, observable and recoverable.**
 
 [![Python](https://img.shields.io/badge/python-3.11+-blue?style=flat-square)](pyproject.toml)
-[![Version](https://img.shields.io/badge/version-0.2.0-purple?style=flat-square)](src/cerebellum/_version.py)
+[![Version](https://img.shields.io/badge/version-0.1.0-purple?style=flat-square)](src/cerebellum/_version.py)
 [![License](https://img.shields.io/badge/license-MIT-green?style=flat-square)](LICENSE)
 
 </div>
@@ -47,6 +47,20 @@ cerebellum tasks
 
 Use Claude instead of the mock by setting `ANTHROPIC_API_KEY` (or `ant auth login`) and running
 `cerebellum demo --live`.
+
+## Screenshots
+
+Captured from a fresh project (`cerebellum init`, `cerebellum demo`, `cerebellum eval --mock`,
+then `cerebellum ui`) with the offline mock AI.
+
+| | |
+|---|---|
+| ![Overview](docs/screenshots/overview.jpg) | ![Run detail](docs/screenshots/run-detail.jpg) |
+| **Overview** — runs, success rate, latency, pending approvals, open tasks, retries and fallbacks; the run list updates live. | **Run detail** — the workflow DAG coloured by step status. The inspector shows `issue_refund` failing twice with HTTP 503 and succeeding on the third attempt. |
+| ![Trace](docs/screenshots/trace.jpg) | ![Approval](docs/screenshots/approval.jpg) |
+| **Trace** — the span waterfall of the same run: the SQL query, the AI assessment, three payment attempts (503, 503, 201) and the write-back. | **Approval** — a $640 refund waits for a human, with the order and the AI assessment the step chose to `show`. Approving resumes the run. |
+| ![Evals](docs/screenshots/evals.jpg) | ![Workflows](docs/screenshots/workflows.jpg) |
+| **Evals** — pass rate, cost and duration trends of the 15-case regression suite. | **Workflows** — definitions on disk and from run history, with a DAG preview and a button to start a run. |
 
 ## Define a workflow
 

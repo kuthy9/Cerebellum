@@ -54,7 +54,7 @@ def run_id_of(result):
 
 def test_version(runner):
     result = invoke(runner, "--version")
-    assert result.exit_code == 0 and "cerebellum 0.2.0" in result.text
+    assert result.exit_code == 0 and "cerebellum 0.1.0" in result.text
 
 
 def test_validate_ok(runner):

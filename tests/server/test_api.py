@@ -132,7 +132,7 @@ def test_info_reports_mock_mode(client):
     info = client.get("/api/info").json()
     assert info["mock"] is True and info["mode"] == "mock AI (requested)"
     assert info["mock_requested"] is True
-    assert info["version"] == "0.2.0"
+    assert info["version"] == "0.1.0"
 
 
 def test_info_tells_a_mock_fallback_from_a_requested_mock(store, settings, tmp_path):

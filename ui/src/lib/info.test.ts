@@ -3,7 +3,7 @@ import type { Info } from "../types";
 import { mockNotice } from "./info";
 
 const info = (over: Partial<Info>): Info => ({
-  version: "0.2.0",
+  version: "0.1.0",
   mode: "Claude API (claude-opus-5-5)",
   mock: false,
   mock_requested: false,
